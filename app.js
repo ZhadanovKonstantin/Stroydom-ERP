@@ -228,16 +228,33 @@ async function runDailyReport() {
 
 // Core Renderer
 function render() {
-  checkLowStock();
-  const appContainer = document.getElementById('app');
-  if (!STATE.user) {
-    appContainer.innerHTML = renderLogin();
-    attachLoginEvents();
-  } else {
-    appContainer.innerHTML = renderDashboard() + renderModal();
-    attachDashboardEvents();
+  try {
+    checkLowStock();
+    const appContainer = document.getElementById('app');
+    if (!appContainer) return;
+    if (!STATE.user) {
+      appContainer.innerHTML = renderLogin();
+      attachLoginEvents();
+    } else {
+      appContainer.innerHTML = renderDashboard() + renderModal();
+      attachDashboardEvents();
+    }
+    if (window.lucide) lucide.createIcons();
+  } catch(err) {
+    console.error('RENDER CRASH:', err);
+    const appContainer = document.getElementById('app');
+    if(appContainer) {
+      appContainer.innerHTML = `
+        <div style="position:fixed;top:0;left:0;right:0;bottom:0;background:#111;display:flex;align-items:center;justify-content:center;z-index:9999;">
+          <div style="background:#1e1e1e;border:2px solid #e74c3c;border-radius:12px;padding:30px;max-width:500px;text-align:center;">
+            <h3 style="color:#e74c3c;margin-top:0;">⚠️ Ошибка интерфейса</h3>
+            <p style="color:#ccc;font-size:13px;font-family:monospace;text-align:left;background:#0a0a0a;padding:10px;border-radius:6px;word-break:break-all;">${err.message}</p>
+            <button onclick="location.reload()" style="background:#e74c3c;color:white;border:none;padding:10px 24px;border-radius:6px;cursor:pointer;margin-top:10px;">🔄 Перезагрузить</button>
+          </div>
+        </div>
+      `;
+    }
   }
-  if (window.lucide) lucide.createIcons();
 }
 
 function updateView(newView) {
