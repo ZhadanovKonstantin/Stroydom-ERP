@@ -111,15 +111,21 @@ async function loadDB() {
 
       auth.onAuthStateChanged(async (user) => {
         if (user) {
-          const erpUser = APP_DATA.users.find(u => u.email === user.email || u.login === user.email.split('@')[0]);
+          const fbEmail = user.email.toLowerCase();
+          const fbPrefix = fbEmail.split('@')[0];
+          const erpUser = APP_DATA.users.find(u => {
+            const uLogin = (u.login || '').toLowerCase();
+            const uEmail = (u.email || '').toLowerCase();
+            return uEmail === fbEmail || uLogin === fbEmail || uLogin === fbPrefix;
+          });
           if (erpUser) {
-            // Mapping Firebase UID to our user for better security tracking
-            if(!erpUser.uid) {
-              erpUser.uid = user.uid;
-              saveDB(); 
-            }
+            if(!erpUser.uid) { erpUser.uid = user.uid; saveDB(); }
             STATE.user = erpUser;
             if (STATE.view === 'login') STATE.view = (erpUser.role === 'client' ? 'client_orders' : 'employee_plans');
+          } else {
+            // User authenticated in Firebase but not found in ERP list — stay on login with message
+            STATE.user = null;
+            STATE.view = 'login';
           }
         } else {
           STATE.user = null;
@@ -136,6 +142,10 @@ async function loadDB() {
     if (!APP_DATA.settings || !APP_DATA.settings.tgToken) {
       APP_DATA.settings = DEFAULT_DATA.settings;
       saveDB();
+    }
+    // Migration: Ensure expenses array exists
+    if (!APP_DATA.expenses) {
+      APP_DATA.expenses = [];
     }
 
     // Check for daily reports
