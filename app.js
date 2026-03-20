@@ -36,9 +36,11 @@ const DEFAULT_DATA = {
   ],
   auditLog: [],
   notifications: [],
+  expenses: [], // New Expense tracking
   settings: {
     tgToken: '8624915292:AAFO7x2HiqLSM-wb9r6RV3Cpt0kc0CdFK_M',
-    tgChatId: '-5167131530'
+    tgChatId: '-5167131530',
+    lastDailyReport: ''
   }
 };
 
@@ -58,7 +60,7 @@ const db = firebase.firestore();
 const auth = firebase.auth();
 
 let APP_DATA = DEFAULT_DATA;
-let CLOUD_STATUS = 'loading'; // 'loading', 'online', 'offline', 'error'
+let CLOUD_STATUS = 'loading'; 
 let STATE = JSON.parse(localStorage.getItem(SESSION_KEY)) || { user: null, view: 'login' };
 const MODAL = { active: false, title: '', html: '', onSubmit: null };
 
@@ -135,6 +137,9 @@ async function loadDB() {
       APP_DATA.settings = DEFAULT_DATA.settings;
       saveDB();
     }
+
+    // Check for daily reports
+    runDailyReport();
   } catch(e) {
     hideLoading();
     CLOUD_STATUS = 'error';
@@ -161,6 +166,44 @@ function checkLowStock() {
     }
   });
   if(changed) saveDB();
+}
+
+async function runDailyReport() {
+  const today = new Date().toISOString().split('T')[0];
+  if (APP_DATA.settings.lastDailyReport === today) return;
+
+  let report = `☀️ <b>Утренняя сводка ERP: ${today}</b>\n\n`;
+  let hasContent = false;
+
+  // 1. Stock Section
+  const lowStock = APP_DATA.inventory.filter(i => i.stock <= 5);
+  if (lowStock.length > 0) {
+    report += `📦 <b>КРИТИЧЕСКИЙ ОСТАТОК (<=5 шт):</b>\n`;
+    lowStock.forEach(i => report += `• ${i.name}: <b>${i.stock} шт.</b>\n`);
+    report += `\n`;
+    hasContent = true;
+  }
+
+  // 2. Deadline Section
+  const tomorrow = new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const tomorrowStr = tomorrow.toISOString().split('T')[0];
+
+  const urgentPlans = APP_DATA.plans.filter(p => p.status !== 'done' && (p.date <= today || p.date === tomorrowStr));
+  const urgentOrders = APP_DATA.orders.filter(o => o.stage !== 'Оплачен' && (o.date <= today || o.date === tomorrowStr));
+
+  if (urgentPlans.length > 0 || urgentOrders.length > 0) {
+    report += `⏳ <b>СРОЧНЫЕ ДЕДЛАЙНЫ (Сегодня/Завтра):</b>\n`;
+    urgentPlans.forEach(p => report += `• Задача: "${p.title}" (${p.date || '!'})\n`);
+    urgentOrders.forEach(o => report += `• Заказ: ${o.client} (${o.date || '!'})\n`);
+    hasContent = true;
+  }
+
+  if (hasContent) {
+    await sendTelegramNotification(report);
+    APP_DATA.settings.lastDailyReport = today;
+    saveDB();
+  }
 }
 
 // Core Renderer
@@ -311,7 +354,7 @@ function renderDashboard() {
   } else {
     navLinks = `
       <div class="nav-item ${STATE.view === 'client_orders' ? 'active' : ''}" data-view="client_orders">
-        <i data-lucide="list"></i> Мои заказы
+        <i data-lucide="list"></i> My Orders
       </div>
     `;
   }
@@ -340,7 +383,7 @@ function renderDashboard() {
                background:${CLOUD_STATUS==='online' ? 'rgba(46, 204, 113, 0.2)' : (CLOUD_STATUS==='error' ? 'rgba(231, 76, 60, 0.2)' : 'rgba(255,165,0,0.2)')};
                color:${CLOUD_STATUS==='online' ? '#2ecc71' : (CLOUD_STATUS==='error' ? '#e74c3c' : '#ffa500')};">
                <i data-lucide="${CLOUD_STATUS==='online' ? 'cloud-check' : (CLOUD_STATUS==='error' ? 'cloud-off' : 'cloud-lightning')}" style="width:12px;height:12px; vertical-align:text-top; margin-right:4px;"></i>
-               Cloud: ${CLOUD_STATUS==='online' ? 'Синхронизировано' : (CLOUD_STATUS==='error' ? 'Ошибка связи' : 'Подключение...')}
+               Cloud: ${CLOUD_STATUS==='online' ? I18N[STATE.lang].cloud_synced : (CLOUD_STATUS==='error' ? I18N[STATE.lang].cloud_error : I18N[STATE.lang].cloud_loading)}
             </span>
           </div>
           <div class="user-profile">
@@ -398,17 +441,17 @@ function renderModal() {
 }
 
 function getViewTitle() {
+  const lang = STATE.lang || 'ru';
   switch(STATE.view) {
-    case 'employee_plans': return STATE.user.role === 'admin' ? 'Задачи всего персонала' : 'Мои задачи';
-    case 'employee_orders': return 'Сделки и Заказы (CRM)';
-    case 'employee_inventory': return 'Склад и остатки';
-    case 'client_orders': return 'Мои покупки';
-    case 'admin_finance': return 'Аналитика и Финансы';
-    case 'admin_settings': return 'Панель администратора';
-    case 'admin_logs': return 'Журнал активности в системе';
-    case 'admin_tasks_history': return 'Архив и история задач';
-    case 'admin_requests_history': return 'Архив складских заявок';
-    default: return 'Доска ERP';
+    case 'employee_plans': return I18N[lang].view_plans;
+    case 'employee_orders': return I18N[lang].view_orders;
+    case 'employee_inventory': return I18N[lang].view_inventory;
+    case 'admin_tasks_history': return I18N[lang].view_history_tasks;
+    case 'admin_requests_history': return I18N[lang].view_history_req;
+    case 'admin_finance': return I18N[lang].view_finance;
+    case 'admin_settings': return I18N[lang].view_accounts;
+    case 'admin_logs': return I18N[lang].view_logs;
+    default: return I18N[lang].dashboard;
   }
 }
 
@@ -561,6 +604,7 @@ function renderCurrentViewContent() {
            <div style="display:flex; justify-content:space-between; margin-bottom: 24px;">
              <h3>Товарные остатки склада</h3>
              <div style="display:flex; gap:8px; align-items:center;">
+               <button class="btn btn-secondary" onclick="startQRScanner()"><i data-lucide="scan" style="width:16px; height:16px; vertical-align:middle; margin-right:4px;"></i> Сканер QR</button>
                <button class="btn btn-secondary" onclick="exportExcel('inventory')"><i data-lucide="download" style="width:16px; height:16px; vertical-align:middle;"></i> Скачать Excel</button>
                ${isAdmin ? `
                  <label class="btn btn-secondary" style="cursor:pointer; margin:0;" title="Загрузить список товаров из Excel">
@@ -580,7 +624,7 @@ function renderCurrentViewContent() {
                 <th style="padding: 12px; color:var(--text-muted);">Название товара/стройматериала</th>
                 <th style="padding: 12px; color:var(--text-muted);">Остаток</th>
                 <th style="padding: 12px; color:var(--text-muted);">Закупочная цена (1 ед.)</th>
-                ${isAdmin ? '<th style="padding: 12px; color:var(--text-muted); text-align:right;">Действия</th>' : ''}
+                <th style="padding: 12px; color:var(--text-muted); text-align:right;">Действия</th>
               </tr>
             </thead>
             <tbody>
@@ -767,7 +811,11 @@ function renderCurrentViewContent() {
     // ----------- ADMIN: FINANCE -----------
     case 'admin_finance': {
       const invValue = APP_DATA.inventory.reduce((a, b) => a + (b.stock * b.price), 0);
-      const rev = APP_DATA.orders.filter(o => o.stage === 'Оплачен').reduce((a, b) => a + b.sum, 0);
+      const totalRevenue = APP_DATA.orders.reduce((sum, o) => sum + (o.sum || 0), 0);
+      const totalExpenses = (APP_DATA.expenses || []).reduce((sum, e) => sum + (e.sum || 0), 0);
+      const netProfit = totalRevenue - totalExpenses;
+      
+      const revPaid = APP_DATA.orders.filter(o => o.stage === 'Оплачен').reduce((a, b) => a + b.sum, 0);
       const pending = APP_DATA.orders.filter(o => o.stage !== 'Оплачен').reduce((a, b) => a + b.sum, 0);
       
       const stages = ['Новый', 'В работе', 'Сдан', 'Оплачен'];
@@ -814,37 +862,58 @@ function renderCurrentViewContent() {
 
       return `
         <div class="glass-panel" style="padding:24px;">
-           <div style="margin-bottom: 24px;">
-             <h3>Финансовая аналитика (Бюджет компании)</h3>
-             <p style="color:var(--text-muted); font-size:13px;">Учет активов строительной базы и движения средств по заказам (Валюта: сом).</p>
+           <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 24px;">
+             <div>
+               <h3>Финансовая аналитика (Бюджет компании)</h3>
+               <p style="color:var(--text-muted); font-size:13px;">Учет активов строительной базы и движения средств по заказам (Валюта: сом).</p>
+             </div>
+             <div style="display:flex; gap:8px;">
+               <button class="btn" onclick="generateAIReport()" style="background:linear-gradient(135deg, #6e45e2 0%, #88d3ce 100%); border:none;"><i data-lucide="sparkles" style="width:16px; height:16px; vertical-align:middle; margin-right:6px;"></i> AI Анализ бизнеса</button>
+               <button class="btn" onclick="addExpense()" style="background:var(--danger); border:none;"><i data-lucide="minus-circle" style="width:16px; height:16px; vertical-align:middle; margin-right:6px;"></i> Записать Расход</button>
+             </div>
            </div>
            
-           <div class="grid-cards">
+           <div class="grid-cards" style="grid-template-columns: repeat(3, 1fr);">
              <div class="glass-panel card" style="border-top-color: var(--primary);">
-               <div class="card-title">📦 Общая стоимость склада</div>
-               <div style="font-size:36px; font-weight:800; color:var(--text-main);">${invValue.toLocaleString()} <span style="font-size:18px; color:var(--text-muted);">сом</span></div>
+               <div class="card-title">📦 Активы склада</div>
+               <div style="font-size:24px; font-weight:800; color:var(--text-main);">${invValue.toLocaleString()} <span style="font-size:14px; color:var(--text-muted);">сом</span></div>
              </div>
              <div class="glass-panel card" style="border-top-color: var(--success);">
-               <div class="card-title">💰 Выручка (Оплаченные заказы)</div>
-               <div style="font-size:36px; font-weight:800; color:var(--success);">${rev.toLocaleString()} <span style="font-size:18px; color:var(--text-muted);">сом</span></div>
+               <div class="card-title">💰 Чистая Прибыль</div>
+               <div style="font-size:24px; font-weight:800; color:var(--success);">${netProfit.toLocaleString()} <span style="font-size:14px; color:var(--text-muted);">сом</span></div>
              </div>
-             <div class="glass-panel card" style="border-top-color: var(--text-muted);">
-               <div class="card-title">⏳ Ожидаемые поступления (В работе)</div>
-               <div style="font-size:36px; font-weight:800; color:var(--text-main);">${pending.toLocaleString()} <span style="font-size:18px; color:var(--text-muted);">сом</span></div>
+             <div class="glass-panel card" style="border-top-color: var(--danger);">
+               <div class="card-title">📉 Общие Расходы</div>
+               <div style="font-size:24px; font-weight:800; color:var(--danger);">${totalExpenses.toLocaleString()} <span style="font-size:14px; color:var(--text-muted);">сом</span></div>
              </div>
            </div>
-           
-           <div style="display:grid; grid-template-columns: 1fr 1fr; gap:24px; margin-top:24px;">
-             <!-- Chart: Funnel -->
-             <div class="glass-panel" style="padding:24px; border: 1px solid rgba(255,255,255,0.05);">
-               <h4 style="margin-bottom:20px; display:flex; align-items:center; gap:8px;"><i data-lucide="bar-chart-2" style="width:18px; height:18px; color:var(--primary);"></i> Воронка обработки Лидов</h4>
-               ${funnelHtml}
-             </div>
-             
-             <!-- Chart: Top Employees -->
-             <div class="glass-panel" style="padding:24px; border: 1px solid rgba(255,255,255,0.05);">
-               <h4 style="margin-bottom:20px; display:flex; align-items:center; gap:8px;"><i data-lucide="award" style="width:18px; height:18px; color:var(--accent);"></i> Рейтинг сотрудников (Закрытые задачи)</h4>
-               ${empStatsHtml}
+
+           <div style="display:grid; grid-template-columns: 1fr 2fr; gap:24px; margin-top:24px;">
+              <div class="glass-panel" style="padding:20px; border: 1px solid rgba(255,255,255,0.05);">
+                <h4 style="margin-bottom:15px; color:var(--primary);">🧾 Касса (Последние 10)</h4>
+                <div style="max-height:250px; overflow-y:auto;">
+                  ${(APP_DATA.expenses || []).slice(0, 10).map(e => `
+                    <div style="font-size:12px; padding:10px 0; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center;">
+                      <div>
+                        <div style="font-weight:600;">${e.category}</div>
+                        <div style="font-size:10px; color:var(--text-muted)">${e.date}</div>
+                      </div>
+                      <span style="color:var(--danger); font-weight:700;">-${e.sum.toLocaleString()} сом</span>
+                    </div>
+                  `).join('') || '<div style="color:var(--text-muted); padding:10px 0;">Нет записей</div>'}
+                </div>
+              </div>
+              
+              <div class="glass-panel" style="padding:20px; border: 1px solid rgba(255,255,255,0.05);">
+                <h4 style="margin-bottom:20px; display:flex; align-items:center; gap:8px;"><i data-lucide="bar-chart-2" style="width:18px; height:18px; color:var(--primary);"></i> Воронка обработки Лидов</h4>
+                ${funnelHtml}
+              </div>
+           </div>
+
+           <div class="glass-panel" style="padding:24px; margin-top: 24px; border: 1px solid rgba(255,255,255,0.05);">
+             <h4 style="margin-bottom:20px; display:flex; align-items:center; gap:8px;"><i data-lucide="award" style="width:18px; height:18px; color:var(--accent);"></i> Высокая продуктивность сотрудников (Закрытые задачи)</h4>
+             <div style="display:grid; grid-template-columns: 1fr 1fr; gap:40px;">
+                ${empStatsHtml}
              </div>
            </div>
 
@@ -999,7 +1068,7 @@ window.exportExcel = function(type) {
   } else if (type === 'tasks') {
     data = APP_DATA.plans.filter(p => p.status === 'archived').map(p => {
        const empName = (APP_DATA.users.find(u => u.id == p.empId) || {}).name || '-';
-       return { "Исполнитель": empName, "Задача": p.title, "Дедлайн": (p.date || '-'), "Срожность": (p.urgency === 'urgent' ? 'СРОЧНО' : 'Плановая') };
+       return { "Исполнитель": empName, "Задача": p.title, "Дедлайн": (p.date || '-'), "Срочность": (p.urgency === 'urgent' ? 'СРОЧНО' : 'Плановая') };
     });
   } else if (type === 'requests') {
     data = APP_DATA.requests.filter(r => r.status === 'Архивировано').map(r => ({ "Сотрудник": r.empName, "Название товара": r.itemName, "Количество": r.qty, "Статус": (r.prevStatus || 'Отработана') }));
@@ -1454,14 +1523,17 @@ window.addInventory = function() {
   `;
   window.openModal('Поступление на склад', formHtml, () => {
     const name = document.getElementById('modName').value;
+    const stock = parseInt(document.getElementById('modStock').value);
     APP_DATA.inventory.push({
       id: Math.floor(Math.random()*10000),
       category: document.getElementById('modCat').value,
       name: name,
-      stock: parseInt(document.getElementById('modStock').value),
-      price: parseInt(document.getElementById('modPrice').value)
+      stock: stock,
+      price: parseInt(document.getElementById('modPrice').value),
+      history: [{ date: new Date().toLocaleString(), user: STATE.user.name, action: 'Начальный ввод', qty: stock }]
     });
     addLog(`Склад: Добавил новую номенклатуру "${name}"`);
+    saveDB();
     window.closeModal();
   });
 };
@@ -1502,12 +1574,132 @@ window.editInventory = function(id) {
     item.price = parseInt(document.getElementById('modPrice').value);
     
     if (oldStock !== item.stock) {
+      if(!item.history) item.history = [];
+      const diff = item.stock - oldStock;
+      item.history.unshift({ 
+        date: new Date().toLocaleString(), 
+        user: STATE.user.name, 
+        action: diff > 0 ? 'Пополнение' : 'Списание', 
+        qty: Math.abs(diff) 
+      });
       addLog(`Склад: Изменил остатки "${item.name}" (${oldStock} -> ${item.stock})`);
     } else {
       addLog(`Склад: Обновил карточку материала "${item.name}"`);
     }
+    saveDB();
     window.closeModal();
   });
+};
+
+window.viewInventoryDetails = function(id) {
+  const item = APP_DATA.inventory.find(i => i.id === id);
+  if(!item) return;
+  const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=ERP_ITEM_${item.id}`;
+  
+  const historyHtml = (item.history || []).map(h => `
+    <div style="font-size:12px; padding:8px; border-bottom:1px solid var(--border); display:flex; justify-content:space-between;">
+      <span>${h.date} - <b>${h.action}</b> (${h.qty} шт.)</span>
+      <span style="color:var(--text-muted)">${h.user}</span>
+    </div>
+  `).join('') || '<div style="padding:10px; color:var(--text-muted)">История пуста</div>';
+
+  const html = `
+    <div style="display:flex; gap:20px; align-items:flex-start;">
+      <div style="text-align:center;">
+        <img src="${qrUrl}" style="border: 4px solid white; border-radius: 8px; margin-bottom:10px;">
+        <div style="font-size:11px; color:var(--text-muted)">QR-код товара ID:${item.id}</div>
+      </div>
+      <div style="flex:1;">
+        <h4 style="margin-top:0;">${item.name}</h4>
+        <p style="color:var(--primary); font-weight:700;">${item.stock} шт. на складе</p>
+        <div style="margin-top:20px; border-top:1px solid var(--border); padding-top:10px;">
+          <h5 style="margin-bottom:10px;">История перемещений:</h5>
+          <div style="max-height:200px; overflow-y:auto; border:1px solid var(--border); border-radius:4px; background:rgba(0,0,0,0.1)">
+            ${historyHtml}
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+  window.openModal('Детальная информация', html, null);
+};
+
+window.addExpense = function() {
+  const formHtml = `
+    <div class="input-block">
+      <label>Категория расхода</label>
+      <select id="expCat">
+        <option value="Зарплата">Зарплата / Выплаты</option>
+        <option value="Материалы">Закупка стройматериалов</option>
+        <option value="Аренда">Аренда / Коммуналка</option>
+        <option value="Налоги">Налоги / Сборы</option>
+        <option value="Другое">Прочее / Накладные</option>
+      </select>
+    </div>
+    <div class="input-block">
+      <label>Сумма (сом)</label>
+      <input id="expSum" type="number" required>
+    </div>
+    <div class="input-block">
+      <label>Комментарий / Кому</label>
+      <input id="expComment" placeholder="Например: Закупка арматуры у Виктора" required>
+    </div>
+  `;
+  window.openModal('Зафиксировать расход (Касса)', formHtml, () => {
+     const sum = parseInt(document.getElementById('expSum').value) || 0;
+     APP_DATA.expenses.unshift({
+        id: Date.now(),
+        date: new Date().toLocaleDateString(),
+        category: document.getElementById('expCat').value,
+        sum: sum,
+        comment: document.getElementById('expComment').value,
+        user: STATE.user.name
+     });
+     addLog(`Финансы: Расход -${sum} сом (${document.getElementById('expCat').value})`);
+     window.closeModal();
+     saveDB();
+     render();
+  });
+};
+
+window.generateAIReport = function() {
+  showLoading(STATE.lang === 'ru' ? 'Искусственный интеллект анализирует данные...' : 'AI is analyzing your business data...');
+  
+  setTimeout(() => {
+    hideLoading();
+    const rev = APP_DATA.orders.reduce((s, o) => s + (o.sum || 0), 0);
+    const exp = (APP_DATA.expenses || []).reduce((s, e) => s + (e.sum || 0), 0);
+    const profit = rev - exp;
+    const lowItems = APP_DATA.inventory.filter(i => i.stock <= 5).length;
+    
+    let advice = "";
+    if (STATE.lang === 'ru') {
+       if (profit > 0) advice = "✅ Бизнес в плюсе. Рекомендую инвестировать в закупку ходовых материалов.";
+       else advice = "⚠️ Расходы превышают доходы. Нужно сократить издержки.";
+       if (lowItems > 0) advice += `\n⚠️ Внимание: у вас ${lowItems} позиций почти закончились!`;
+    } else {
+       if (profit > 0) advice = "✅ Business is profitable. Invest in high-demand stock.";
+       else advice = "⚠️ Expenses exceed revenue. Consider cost reduction.";
+       if (lowItems > 0) advice += `\n⚠️ Warning: ${lowItems} items are low on stock!`;
+    }
+
+    const reportHtml = `
+      <div style="background: linear-gradient(135deg, rgba(110, 69, 226, 0.1) 0%, rgba(136, 211, 206, 0.1) 100%); padding: 25px; border-radius: 12px; border: 1px solid var(--primary); box-shadow: var(--shadow);">
+        <h3 style="margin-top:0; color:var(--primary); display:flex; align-items:center; gap:10px;">
+          <i data-lucide="sparkles"></i> ${STATE.lang === 'ru' ? 'AI Аналитика Бизнеса' : 'AI Business Insights'}
+        </h3>
+        <p style="font-size:15px; line-height:1.6; color:var(--text-main);">
+          ${STATE.lang === 'ru' ? 'Отчет на:' : 'Report generated on:'} <b>${new Date().toLocaleDateString()}</b>:
+          <br/><br/>
+          💰 <b>${STATE.lang === 'ru' ? 'Чистая Прибыль:' : 'Net Profit:'}</b> <span style="color:var(--success); font-weight:800;">${profit.toLocaleString()} сом</span>. 
+          <br/><br/>
+          💡 <b>${STATE.lang === 'ru' ? 'Совет от ИИ:' : 'AI Advice:'}</b> ${advice}
+        </p>
+      </div>
+    `;
+    window.openModal(STATE.lang === 'ru' ? 'AI Бизнес-Аналитика' : 'AI Business Analytics', reportHtml, null);
+    if(window.lucide) lucide.createIcons();
+  }, 1200);
 };
 
 // USER CRUD
@@ -1548,6 +1740,7 @@ window.addUser = function() {
       role: document.getElementById('modURole').value,
     });
     addLog(`Безопасность: Зарегистрировал пользователя "${username}"`);
+    saveDB();
     window.closeModal();
   });
 };
@@ -1584,6 +1777,7 @@ window.editUser = function(id) {
     user.login = document.getElementById('modULogin').value;
     user.password = document.getElementById('modUPassword').value;
     addLog(`Безопасность: Изменил данные пользователя "${user.name}"`);
+    saveDB();
     window.closeModal();
   });
 };
@@ -1594,8 +1788,41 @@ window.deleteUser = function(id) {
     APP_DATA.users = APP_DATA.users.filter(u => u.id !== id);
     APP_DATA.plans = APP_DATA.plans.filter(p => p.empId !== id);
     addLog(`Безопасность: Удалил аккаунт "${user.name}"`);
+    saveDB();
     render();
   }
+};
+
+
+// ---------------- QR SCANNER ---------------- //
+let scanner = null;
+window.startQRScanner = function() {
+  const html = `
+    <div id="reader" style="width: 100%; min-height: 300px; border-radius: 8px; overflow: hidden; background: #000;"></div>
+    <div id="qr-result" style="margin-top: 10px; color: var(--primary); font-weight: 600; text-align: center;"></div>
+  `;
+  window.openModal('Сканировать QR-код товара', html, null);
+  
+  setTimeout(() => {
+    scanner = new Html5Qrcode("reader");
+    scanner.start(
+      { facingMode: "environment" },
+      { fps: 10, qrbox: 250 },
+      (decodedText) => {
+        if (decodedText.startsWith("ERP_ITEM_")) {
+          const id = parseInt(decodedText.replace("ERP_ITEM_", ""));
+          scanner.stop();
+          window.closeModal();
+          viewInventoryDetails(id);
+        } else {
+          document.getElementById('qr-result').innerText = "Неизвестный код: " + decodedText;
+        }
+      },
+      (errorMessage) => { /* ignore console noise */ }
+    ).catch(err => {
+      document.getElementById('reader').innerHTML = `<div style="padding:20px; color:var(--danger)">Ошибка камеры: ${err}</div>`;
+    });
+  }, 100);
 };
 
 // ---------------- EVENTS ---------------- //
