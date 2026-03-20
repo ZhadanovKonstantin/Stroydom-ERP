@@ -421,7 +421,7 @@ function renderDashboard() {
                background:${CLOUD_STATUS==='online' ? 'rgba(46, 204, 113, 0.2)' : (CLOUD_STATUS==='error' ? 'rgba(231, 76, 60, 0.2)' : 'rgba(255,165,0,0.2)')};
                color:${CLOUD_STATUS==='online' ? '#2ecc71' : (CLOUD_STATUS==='error' ? '#e74c3c' : '#ffa500')};">
                <i data-lucide="${CLOUD_STATUS==='online' ? 'cloud-check' : (CLOUD_STATUS==='error' ? 'cloud-off' : 'cloud-lightning')}" style="width:12px;height:12px; vertical-align:text-top; margin-right:4px;"></i>
-               Cloud: ${CLOUD_STATUS==='online' ? I18N[STATE.lang].cloud_synced : (CLOUD_STATUS==='error' ? I18N[STATE.lang].cloud_error : I18N[STATE.lang].cloud_loading)}
+               Cloud: ${CLOUD_STATUS==='online' ? 'Синхронизировано' : (CLOUD_STATUS==='error' ? 'Ошибка связи' : 'Подключение...')}
             </span>
           </div>
           <div class="user-profile">
