@@ -1842,7 +1842,7 @@ function attachLoginEvents() {
         const $pass = document.getElementById('password');
         if (selectedRole === 'admin') {
           $user.value = 'Bro';
-          $pass.value = '1234';
+          $pass.value = '123456';
         } else if (selectedRole === 'employee') {
           $user.value = 'alex';
           $pass.value = '123';
@@ -1865,8 +1865,8 @@ function attachLoginEvents() {
       errorLabel.style.display = 'none';
 
       // Transform login to email (Firebase format)
-      // If user typed 'alex', we try 'alex@stroydom.kg' (default domain for ERP)
       const email = loginInput.includes('@') ? loginInput : `${loginInput.toLowerCase()}@stroydom.kg`;
+      console.log("Попытка входа через Firebase:", email);
 
       try {
         const userCredential = await auth.signInWithEmailAndPassword(email, passwordInput);
