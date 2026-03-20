@@ -61,30 +61,57 @@ const MODAL = { active: false, title: '', html: '', onSubmit: null };
 // Global Saves to Firestore
 async function saveDB() {
   try {
-     await db.collection('erp_system').doc('main_data').set(APP_DATA);
+     // Safety: Always remove passwords before saving to cloud
+     const dataToSave = JSON.parse(JSON.stringify(APP_DATA));
+     if(dataToSave.users) {
+       dataToSave.users.forEach(u => delete u.password);
+     }
+
+     await db.collection('erp_system').doc('main_data').set(dataToSave);
      CLOUD_STATUS = 'online';
-     console.log("Cloud Saved Successfully!");
   } catch(e) {
      CLOUD_STATUS = 'error';
      console.error("Cloud Save Error:", e);
-     localStorage.setItem(DB_KEY, JSON.stringify(APP_DATA)); // fallback
+     localStorage.setItem(DB_KEY, JSON.stringify(APP_DATA));
   }
+}
+
+// Real-time Data Listener
+function initRealtimeSync() {
+  db.collection('erp_system').doc('main_data').onSnapshot((doc) => {
+    hideLoading();
+    if (doc.exists) {
+      APP_DATA = doc.data();
+      CLOUD_STATUS = 'online';
+      render();
+    }
+  }, (error) => {
+    hideLoading();
+    CLOUD_STATUS = 'error';
+    render();
+  });
 }
 
 // Data Loader from Firestore
 async function loadDB() {
+  showLoading('Синхронизация с облаком...');
   try {
     const doc = await db.collection('erp_system').doc('main_data').get();
     if (doc.exists) {
       APP_DATA = doc.data();
       CLOUD_STATUS = 'online';
-      console.log("Cloud Data Loaded!");
       
-      // After loading data, check if user is already logged in via Firebase
+      initRealtimeSync();
+
       auth.onAuthStateChanged(async (user) => {
         if (user) {
           const erpUser = APP_DATA.users.find(u => u.email === user.email || u.login === user.email.split('@')[0]);
           if (erpUser) {
+            // Mapping Firebase UID to our user for better security tracking
+            if(!erpUser.uid) {
+              erpUser.uid = user.uid;
+              saveDB(); 
+            }
             STATE.user = erpUser;
             if (STATE.view === 'login') STATE.view = (erpUser.role === 'client' ? 'client_orders' : 'employee_plans');
           }
@@ -94,15 +121,13 @@ async function loadDB() {
         }
         render();
       });
-
     } else {
-      console.log("No cloud data, using defaults and saving...");
       await saveDB();
-      render();
+      initRealtimeSync();
     }
   } catch(e) {
+    hideLoading();
     CLOUD_STATUS = 'error';
-    console.warn("Using LocalStorage fallback", e);
     const local = localStorage.getItem(DB_KEY);
     if(local) APP_DATA = JSON.parse(local);
     render();
@@ -150,13 +175,37 @@ function updateView(newView) {
 
 // Activity Audit Logger
 function addLog(actionDescription) {
-  const userName = STATE.user ? STATE.user.name : 'Системный процесс';
+  const userName = STATE.user ? STATE.user.name : 'Система';
   const roleName = STATE.user ? ` (${STATE.user.role})` : '';
+  const uid = STATE.user && STATE.user.uid ? ` [ID:${STATE.user.uid.slice(0, 5)}]` : '';
   const time = new Date().toLocaleString('ru-RU');
   
-  APP_DATA.auditLog.unshift({ time: time, user: userName + roleName, action: actionDescription });
+  APP_DATA.auditLog.unshift({ time: time, user: userName + roleName + uid, action: actionDescription });
   if (APP_DATA.auditLog.length > 200) APP_DATA.auditLog.pop();
   saveDB();
+}
+
+// Loading UI helpers
+function showLoading(text = 'Загрузка...') {
+  let loader = document.getElementById('globalLoader');
+  if(!loader) {
+    loader = document.createElement('div');
+    loader.id = 'globalLoader';
+    loader.className = 'global-loader';
+    document.body.appendChild(loader);
+  }
+  loader.innerHTML = `
+    <div class="loader-content">
+      <div class="spinner"></div>
+      <div class="loader-text">${text}</div>
+    </div>
+  `;
+  loader.style.display = 'flex';
+}
+
+function hideLoading() {
+  const loader = document.getElementById('globalLoader');
+  if(loader) loader.style.display = 'none';
 }
 
 function sendNotification(userId, message) {
