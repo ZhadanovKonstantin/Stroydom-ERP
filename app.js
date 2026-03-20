@@ -35,7 +35,11 @@ const DEFAULT_DATA = {
     { id: 7, name: 'Bro', login: 'Bro', password: '1234', role: 'admin' }
   ],
   auditLog: [],
-  notifications: [] // New Notification Array
+  notifications: [],
+  settings: {
+    tgToken: '8624915292:AAFO7x2HiqLSM-wb9r6RV3Cpt0kc0CdFK_M',
+    tgChatId: '-5167131530'
+  }
 };
 
 const firebaseConfig = {
@@ -124,6 +128,12 @@ async function loadDB() {
     } else {
       await saveDB();
       initRealtimeSync();
+    }
+    
+    // Migration: Restore settings if they got lost in cloud
+    if (!APP_DATA.settings || !APP_DATA.settings.tgToken) {
+      APP_DATA.settings = DEFAULT_DATA.settings;
+      saveDB();
     }
   } catch(e) {
     hideLoading();
@@ -1364,10 +1374,8 @@ window.addPlan = function() {
     });
     addLog(`Планы: Назначил новую задачу "${title}"`);
     sendNotification(empId, `Вам назначена новая задача: "${title}"`);
-    const empUser = APP_DATA.users.find(u => u.id === empId);
-    if(empUser && empUser.tg) {
-       sendTelegramNotification(`🚨 <b>Новая задача!</b>\nИсполнитель: ${empUser.tg}\nОписание: ${title}\nСрок: ${document.getElementById('modDate').value}\nСрочность: ${document.getElementById('modUrgency').options[document.getElementById('modUrgency').selectedIndex].text}`);
-    }
+    const empName = APP_DATA.users.find(u => u.id === empId)?.name || 'Сотрудник';
+    sendTelegramNotification(`🆕 <b>Новая задача!</b>\n📝: ${title}\n👤: ${empName}\n📅: ${document.getElementById('modDate').value}\n⚡: ${document.getElementById('modUrgency').options[document.getElementById('modUrgency').selectedIndex].text}`);
     window.closeModal();
   });
 };
