@@ -228,8 +228,8 @@ async function runDailyReport() {
 
 // Core Renderer
 function render() {
+  hideLoading(); // Always ensure loader is hidden before rendering
   try {
-    checkLowStock();
     const appContainer = document.getElementById('app');
     if (!appContainer) return;
     if (!STATE.user) {
@@ -238,6 +238,7 @@ function render() {
     } else {
       appContainer.innerHTML = renderDashboard() + renderModal();
       attachDashboardEvents();
+      checkLowStock(); // Run after render so it doesn't block UI
     }
     if (window.lucide) lucide.createIcons();
   } catch(err) {
@@ -1700,7 +1701,7 @@ window.addExpense = function() {
 };
 
 window.generateAIReport = function() {
-  showLoading(STATE.lang === 'ru' ? 'Искусственный интеллект анализирует данные...' : 'AI is analyzing your business data...');
+  showLoading('Искусственный интеллект анализирует данные...');
   
   setTimeout(() => {
     hideLoading();
@@ -1710,31 +1711,25 @@ window.generateAIReport = function() {
     const lowItems = APP_DATA.inventory.filter(i => i.stock <= 5).length;
     
     let advice = "";
-    if (STATE.lang === 'ru') {
-       if (profit > 0) advice = "✅ Бизнес в плюсе. Рекомендую инвестировать в закупку ходовых материалов.";
-       else advice = "⚠️ Расходы превышают доходы. Нужно сократить издержки.";
-       if (lowItems > 0) advice += `\n⚠️ Внимание: у вас ${lowItems} позиций почти закончились!`;
-    } else {
-       if (profit > 0) advice = "✅ Business is profitable. Invest in high-demand stock.";
-       else advice = "⚠️ Expenses exceed revenue. Consider cost reduction.";
-       if (lowItems > 0) advice += `\n⚠️ Warning: ${lowItems} items are low on stock!`;
-    }
+    if (profit > 0) advice = "✅ Бизнес в плюсе. Рекомендую инвестировать в закупку ходовых материалов.";
+    else advice = "⚠️ Расходы превышают доходы. Нужно сократить издержки или повысить цены.";
+    if (lowItems > 0) advice += `\n⚠️ Внимание: у вас ${lowItems} позиций на складе почти закончились!`;
 
     const reportHtml = `
       <div style="background: linear-gradient(135deg, rgba(110, 69, 226, 0.1) 0%, rgba(136, 211, 206, 0.1) 100%); padding: 25px; border-radius: 12px; border: 1px solid var(--primary); box-shadow: var(--shadow);">
         <h3 style="margin-top:0; color:var(--primary); display:flex; align-items:center; gap:10px;">
-          <i data-lucide="sparkles"></i> ${STATE.lang === 'ru' ? 'AI Аналитика Бизнеса' : 'AI Business Insights'}
+          <i data-lucide="sparkles"></i> AI Аналитика Бизнеса
         </h3>
         <p style="font-size:15px; line-height:1.6; color:var(--text-main);">
-          ${STATE.lang === 'ru' ? 'Отчет на:' : 'Report generated on:'} <b>${new Date().toLocaleDateString()}</b>:
+          Отчет на: <b>${new Date().toLocaleDateString()}</b>
           <br/><br/>
-          💰 <b>${STATE.lang === 'ru' ? 'Чистая Прибыль:' : 'Net Profit:'}</b> <span style="color:var(--success); font-weight:800;">${profit.toLocaleString()} сом</span>. 
+          💰 <b>Чистая Прибыль:</b> <span style="color:var(--success); font-weight:800;">${profit.toLocaleString()} сом</span>
           <br/><br/>
-          💡 <b>${STATE.lang === 'ru' ? 'Совет от ИИ:' : 'AI Advice:'}</b> ${advice}
+          💡 <b>Совет от ИИ:</b> ${advice}
         </p>
       </div>
     `;
-    window.openModal(STATE.lang === 'ru' ? 'AI Бизнес-Аналитика' : 'AI Business Analytics', reportHtml, null);
+    window.openModal('AI Бизнес-Аналитика', reportHtml, null);
     if(window.lucide) lucide.createIcons();
   }, 1200);
 };
