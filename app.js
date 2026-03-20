@@ -479,17 +479,16 @@ function renderModal() {
 }
 
 function getViewTitle() {
-  const lang = STATE.lang || 'ru';
   switch(STATE.view) {
-    case 'employee_plans': return I18N[lang].view_plans;
-    case 'employee_orders': return I18N[lang].view_orders;
-    case 'employee_inventory': return I18N[lang].view_inventory;
-    case 'admin_tasks_history': return I18N[lang].view_history_tasks;
-    case 'admin_requests_history': return I18N[lang].view_history_req;
-    case 'admin_finance': return I18N[lang].view_finance;
-    case 'admin_settings': return I18N[lang].view_accounts;
-    case 'admin_logs': return I18N[lang].view_logs;
-    default: return I18N[lang].dashboard;
+    case 'employee_plans': return 'Задачи персонала';
+    case 'employee_orders': return 'Сделки и Заказы (CRM)';
+    case 'employee_inventory': return 'Склад и остатки';
+    case 'admin_tasks_history': return 'Архив выполненных задач';
+    case 'admin_requests_history': return 'Архив заявок склада';
+    case 'admin_finance': return 'Финансовая аналитика';
+    case 'admin_settings': return 'Управление доступом';
+    case 'admin_logs': return 'Аудит действий';
+    default: return 'Доска ERP';
   }
 }
 
