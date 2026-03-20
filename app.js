@@ -100,9 +100,19 @@ function initRealtimeSync() {
 
 // Data Loader from Firestore
 async function loadDB() {
+  // Safety timeout: if Firebase doesn't respond in 8s, show login screen
+  const loadingTimeout = setTimeout(() => {
+    hideLoading();
+    CLOUD_STATUS = 'offline';
+    const local = localStorage.getItem(DB_KEY);
+    if(local) APP_DATA = JSON.parse(local);
+    render();
+  }, 8000);
+
   showLoading('Синхронизация с облаком...');
   try {
     const doc = await db.collection('erp_system').doc('main_data').get();
+    clearTimeout(loadingTimeout); // Cloud responded — cancel timeout
     if (doc.exists) {
       APP_DATA = doc.data();
       CLOUD_STATUS = 'online';
@@ -110,6 +120,7 @@ async function loadDB() {
       initRealtimeSync();
 
       auth.onAuthStateChanged(async (user) => {
+        hideLoading(); // Always hide loader when auth state is known
         if (user) {
           const fbEmail = user.email.toLowerCase();
           const fbPrefix = fbEmail.split('@')[0];
@@ -123,7 +134,6 @@ async function loadDB() {
             STATE.user = erpUser;
             if (STATE.view === 'login') STATE.view = (erpUser.role === 'client' ? 'client_orders' : 'employee_plans');
           } else {
-            // User authenticated in Firebase but not found in ERP list — stay on login with message
             STATE.user = null;
             STATE.view = 'login';
           }
