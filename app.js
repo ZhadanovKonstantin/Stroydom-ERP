@@ -32,7 +32,7 @@ const DEFAULT_DATA = {
     { id: 4, name: 'Елена (HR)', login: 'elena', password: '123', role: 'employee' },
     { id: 5, name: 'Дмитрий (Техник)', login: 'dmitry', password: '123', role: 'employee' },
     { id: 6, name: 'Петр (Клиент)', login: 'peter', password: '123', role: 'client' },
-    { id: 7, name: 'Bro', login: 'Bro', password: '1234', role: 'admin' }
+    { id: 7, name: 'Bro', login: 'bro@stroydom.kg', password: '142536', role: 'admin' }
   ],
   auditLog: [],
   notifications: [],
@@ -1841,8 +1841,8 @@ function attachLoginEvents() {
         const $user = document.getElementById('username');
         const $pass = document.getElementById('password');
         if (selectedRole === 'admin') {
-          $user.value = 'Bro';
-          $pass.value = '123456';
+          $user.value = 'bro@stroydom.kg';
+          $pass.value = '142536';
         } else if (selectedRole === 'employee') {
           $user.value = 'alex';
           $pass.value = '123';
@@ -1865,18 +1865,23 @@ function attachLoginEvents() {
       errorLabel.style.display = 'none';
 
       // Transform login to email (Firebase format)
-      const email = loginInput.includes('@') ? loginInput : `${loginInput.toLowerCase()}@stroydom.kg`;
+      const inputStr = loginInput.toLowerCase().trim();
+      const email = inputStr.includes('@') ? inputStr : `${inputStr}@stroydom.kg`;
       console.log("Попытка входа через Firebase:", email);
 
       try {
         const userCredential = await auth.signInWithEmailAndPassword(email, passwordInput);
         const fbUser = userCredential.user;
         
-        // Find user in our database matching email
-        const validUser = APP_DATA.users.find(u => 
-          (u.email && u.email.toLowerCase() === fbUser.email.toLowerCase()) || 
-          u.login.toLowerCase() === loginInput.toLowerCase()
-        );
+        // Find user in our database matching email or login part
+        const fbEmail = fbUser.email.toLowerCase();
+        const fbPrefix = fbEmail.split('@')[0];
+        
+        const validUser = APP_DATA.users.find(u => {
+          const uLogin = u.login.toLowerCase();
+          const uEmail = (u.email || "").toLowerCase();
+          return uEmail === fbEmail || uLogin === fbEmail || uLogin === fbPrefix;
+        });
 
         if (!validUser) {
           errorLabel.innerText = "Пользователь аутентифицирован, но не найден в базе ERP!";
