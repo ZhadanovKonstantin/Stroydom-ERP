@@ -51,6 +51,7 @@ const firebaseConfig = {
 // Initialize Firebase
 firebase.initializeApp(firebaseConfig);
 const db = firebase.firestore();
+const auth = firebase.auth();
 
 let APP_DATA = DEFAULT_DATA;
 let CLOUD_STATUS = 'loading'; // 'loading', 'online', 'offline', 'error'
@@ -78,17 +79,34 @@ async function loadDB() {
       APP_DATA = doc.data();
       CLOUD_STATUS = 'online';
       console.log("Cloud Data Loaded!");
+      
+      // After loading data, check if user is already logged in via Firebase
+      auth.onAuthStateChanged(async (user) => {
+        if (user) {
+          const erpUser = APP_DATA.users.find(u => u.email === user.email || u.login === user.email.split('@')[0]);
+          if (erpUser) {
+            STATE.user = erpUser;
+            if (STATE.view === 'login') STATE.view = (erpUser.role === 'client' ? 'client_orders' : 'employee_plans');
+          }
+        } else {
+          STATE.user = null;
+          STATE.view = 'login';
+        }
+        render();
+      });
+
     } else {
       console.log("No cloud data, using defaults and saving...");
       await saveDB();
+      render();
     }
   } catch(e) {
     CLOUD_STATUS = 'error';
     console.warn("Using LocalStorage fallback", e);
     const local = localStorage.getItem(DB_KEY);
     if(local) APP_DATA = JSON.parse(local);
+    render();
   }
-  render();
 }
 function saveSession() {
   localStorage.setItem('ERP_SESSION', JSON.stringify(STATE));
@@ -1554,34 +1572,43 @@ function attachLoginEvents() {
 
   const loginForm = document.getElementById('loginForm');
   if(loginForm) {
-    loginForm.addEventListener('submit', (e) => {
+    loginForm.addEventListener('submit', async (e) => {
       e.preventDefault();
-      const usernameInput = document.getElementById('username').value.trim();
+      const loginInput = document.getElementById('username').value.trim();
       const passwordInput = document.getElementById('password').value;
       const errorLabel = document.getElementById('loginError');
       
       errorLabel.style.display = 'none';
 
-      const validUser = APP_DATA.users.find(u => 
-        u.login.toLowerCase() === usernameInput.toLowerCase() && 
-        u.password === passwordInput && 
-        u.role === selectedRole
-      );
+      // Transform login to email (Firebase format)
+      // If user typed 'alex', we try 'alex@stroydom.kg' (default domain for ERP)
+      const email = loginInput.includes('@') ? loginInput : `${loginInput.toLowerCase()}@stroydom.kg`;
 
-      if (!validUser) {
-        errorLabel.innerText = "Отказ в доступе: неверный логин, пароль или роль защиты ERP!";
+      try {
+        const userCredential = await auth.signInWithEmailAndPassword(email, passwordInput);
+        const fbUser = userCredential.user;
+        
+        // Find user in our database matching email
+        const validUser = APP_DATA.users.find(u => 
+          (u.email && u.email.toLowerCase() === fbUser.email.toLowerCase()) || 
+          u.login.toLowerCase() === loginInput.toLowerCase()
+        );
+
+        if (!validUser) {
+          errorLabel.innerText = "Пользователь аутентифицирован, но не найден в базе ERP!";
+          errorLabel.style.display = 'block';
+          return;
+        }
+
+        STATE.user = validUser;
+        updateView(validUser.role === 'admin' || validUser.role === 'employee' ? 'employee_plans' : 'client_orders');
+        addLog(`Авторизовался через Firebase (Безопасный вход)`);
+
+      } catch (error) {
+        console.error("Auth Error:", error);
+        errorLabel.innerText = "Ошибка входа: " + (error.code === 'auth/user-not-found' ? 'Пользователь не найден' : 'Неверный логин или пароль');
         errorLabel.style.display = 'block';
-        return;
       }
-      
-      let startView = 'client_orders';
-      if (validUser.role === 'employee' || validUser.role === 'admin') {
-        startView = 'employee_plans';
-      }
-      
-      STATE.user = validUser;
-      updateView(startView);
-      addLog(`Авторизовался в системе (Успешный вход)`);
     });
   }
 }
@@ -1596,8 +1623,9 @@ function attachDashboardEvents() {
 
   const logoutBtn = document.getElementById('logoutBtn');
   if (logoutBtn) {
-    logoutBtn.addEventListener('click', () => {
+    logoutBtn.addEventListener('click', async () => {
       addLog(`Вышел из системы`);
+      await auth.signOut();
       STATE.user = null;
       updateView('login');
     });
