@@ -1,3 +1,6 @@
+// ERP Version: 2.0.1 (Stable - No I18N)
+window.I18N = { ru: {}, en: {} }; 
+
 // Data Persistence Keys
 const DB_KEY = 'stroykomplekt_db';
 const SESSION_KEY = 'stroykomplekt_session';
@@ -20,27 +23,30 @@ const DEFAULT_DATA = {
     { id: 2, empName: 'Марина (Бухгалтер)', itemName: 'Бумага А4 (коробка)', qty: 2, status: 'Одобрено' }
   ],
   orders: [
-    { id: 'ORD-001', client: 'ООО Ромашка', stage: 'В работе', sum: 145000, date: '2026-03-10' },
-    { id: 'ORD-002', client: 'ИП Иванов', stage: 'Сдан', sum: 32000, date: '2026-03-15' },
-    { id: 'ORD-003', client: 'Tech Corp', stage: 'Новый', sum: 850000, date: '2026-03-18' },
-    { id: 'ORD-004', client: 'СтройИнвест', stage: 'Оплачен', sum: 560000, date: '2026-02-28' }
+    { id: 'ORD-001', client: 'ООО Ромашка', stage: 'В работе', sum: 145000, date: '2026-03-10', workerCategory: 'Монтажники' },
+    { id: 'ORD-002', client: 'ИП Иванов', stage: 'Сдан', sum: 32000, date: '2026-03-15', workerCategory: 'Монтажники' },
+    { id: 'ORD-003', client: 'Tech Corp', stage: 'Новый', sum: 850000, date: '2026-03-18', workerCategory: 'Офис' },
+    { id: 'ORD-004', client: 'СтройИнвест', stage: 'Оплачен', sum: 560000, date: '2026-02-28', workerCategory: 'Монтажники' }
   ],
   users: [
-    { id: 1, name: 'Алексей (Монтажник)', login: 'alex', password: '123', role: 'employee' },
-    { id: 2, name: 'Марина (Бухгалтер)', login: 'marina', password: '123', role: 'employee' },
-    { id: 3, name: 'Игорь (Снабжение)', login: 'igor', password: '123', role: 'employee' },
-    { id: 4, name: 'Елена (HR)', login: 'elena', password: '123', role: 'employee' },
-    { id: 5, name: 'Дмитрий (Техник)', login: 'dmitry', password: '123', role: 'employee' },
+    { id: 1, name: 'Алексей (Монтажник)', login: 'alex', password: '123', role: 'employee', category: 'Монтажники' },
+    { id: 2, name: 'Марина (Бухгалтер)', login: 'marina', password: '123', role: 'employee', category: 'Офис' },
+    { id: 3, name: 'Игорь (Снабжение)', login: 'igor', password: '123', role: 'employee', category: 'Снабжение' },
+    { id: 4, name: 'Елена (HR)', login: 'elena', password: '123', role: 'employee', category: 'Офис' },
+    { id: 5, name: 'Дмитрий (Техник)', login: 'dmitry', password: '123', role: 'employee', category: 'Монтажники' },
     { id: 6, name: 'Петр (Клиент)', login: 'peter', password: '123', role: 'client' },
-    { id: 7, name: 'Bro', login: 'bro@stroydom.kg', password: '142536', role: 'admin' }
+    { id: 7, name: 'Bro', login: 'bro@stroydom.kg', password: '142536', role: 'admin', category: 'Офис' }
   ],
   auditLog: [],
   notifications: [],
+  chatMessages: [],
   expenses: [], // New Expense tracking
   settings: {
     tgToken: '8624915292:AAFO7x2HiqLSM-wb9r6RV3Cpt0kc0CdFK_M',
     tgChatId: '-5167131530',
-    lastDailyReport: ''
+    lastDailyReport: '',
+    reportTime: '09:00',
+    workerCategories: ['Монтажники', 'Бригадиры', 'Снабжение', 'Офис']
   }
 };
 
@@ -61,7 +67,8 @@ const auth = firebase.auth();
 
 let APP_DATA = DEFAULT_DATA;
 let CLOUD_STATUS = 'loading'; 
-let STATE = JSON.parse(localStorage.getItem(SESSION_KEY)) || { user: null, view: 'login' };
+let STATE = JSON.parse(localStorage.getItem(SESSION_KEY)) || { user: null, view: 'login', theme: 'dark' };
+if (!STATE.theme) STATE.theme = 'dark'; // Migrate older sessions
 const MODAL = { active: false, title: '', html: '', onSubmit: null };
 
 // Global Saves to Firestore
@@ -133,6 +140,8 @@ async function loadDB() {
             if(!erpUser.uid) { erpUser.uid = user.uid; saveDB(); }
             STATE.user = erpUser;
             if (STATE.view === 'login') STATE.view = (erpUser.role === 'client' ? 'client_orders' : 'employee_plans');
+            // Clean forced re-renders
+            STATE._forceFullRender = true;
           } else {
             STATE.user = null;
             STATE.view = 'login';
@@ -188,57 +197,121 @@ function checkLowStock() {
   if(changed) saveDB();
 }
 
-async function runDailyReport() {
-  const today = new Date().toISOString().split('T')[0];
-  if (APP_DATA.settings.lastDailyReport === today) return;
+async function runDailyReport(isManual = false, type = 'full') {
+  const now = new Date();
+  const today = now.toISOString().split('T')[0];
+  const currentTime = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+  const targetTime = APP_DATA.settings.reportTime || "09:00";
 
-  let report = `☀️ <b>Утренняя сводка ERP: ${today}</b>\n\n`;
-  let hasContent = false;
-
-  // 1. Stock Section
-  const lowStock = APP_DATA.inventory.filter(i => i.stock <= 5);
-  if (lowStock.length > 0) {
-    report += `📦 <b>КРИТИЧЕСКИЙ ОСТАТОК (<=5 шт):</b>\n`;
-    lowStock.forEach(i => report += `• ${i.name}: <b>${i.stock} шт.</b>\n`);
-    report += `\n`;
-    hasContent = true;
+  // Automatic check
+  if (!isManual) {
+    if (currentTime !== targetTime) return;
+    if (APP_DATA.settings.lastDailyReport === today) return;
   }
 
-  // 2. Deadline Section
-  const tomorrow = new Date();
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  const tomorrowStr = tomorrow.toISOString().split('T')[0];
+  let report = "";
+  let hasContent = false;
 
-  const urgentPlans = APP_DATA.plans.filter(p => p.status !== 'done' && (p.date <= today || p.date === tomorrowStr));
-  const urgentOrders = APP_DATA.orders.filter(o => o.stage !== 'Оплачен' && (o.date <= today || o.date === tomorrowStr));
+  if (type === 'full' || type === 'orders') {
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const tomorrowStr = tomorrow.toISOString().split('T')[0];
+    const urgentOrders = (APP_DATA.orders || []).filter(o => o.stage !== 'Оплачен' && (o.date <= today || o.date === tomorrowStr));
+    
+    if (urgentOrders.length > 0) {
+      report += `📈 <b>СВОДКА ПО ЗАКАЗАМ (CRM):</b>\n`;
+      urgentOrders.forEach(o => report += `• ${o.client}: <b>${o.sum.toLocaleString()} сом</b> (Срок: ${o.date})\n`);
+      report += `\n`;
+      hasContent = true;
+    }
+  }
 
-  if (urgentPlans.length > 0 || urgentOrders.length > 0) {
-    report += `⏳ <b>СРОЧНЫЕ ДЕДЛАЙНЫ (Сегодня/Завтра):</b>\n`;
-    urgentPlans.forEach(p => report += `• Задача: "${p.title}" (${p.date || '!'})\n`);
-    urgentOrders.forEach(o => report += `• Заказ: ${o.client} (${o.date || '!'})\n`);
-    hasContent = true;
+  if (type === 'full' || type === 'tasks') {
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const tomorrowStr = tomorrow.toISOString().split('T')[0];
+    const urgentPlans = (APP_DATA.plans || []).filter(p => p.status !== 'done' && (p.date <= today || p.date === tomorrowStr));
+    
+    if (urgentPlans.length > 0) {
+      report += `📋 <b>СВОДКА ПО ЗАДАЧАМ:</b>\n`;
+      urgentPlans.forEach(p => {
+        const emp = APP_DATA.users.find(u => u.id == p.empId);
+        report += `• ${p.title} [${emp ? emp.name : '?'}] (Срок: ${p.date})\n`;
+      });
+      report += `\n`;
+      hasContent = true;
+    }
+  }
+
+  if (type === 'full') {
+    const lowStock = (APP_DATA.inventory || []).filter(i => i.stock <= 5);
+    if (lowStock.length > 0) {
+      report += `📦 <b>КРИТИЧЕСКИЙ ОСТАТОК СКЛАДА:</b>\n`;
+      lowStock.forEach(i => report += `• ${i.name}: <b>${i.stock} шт.</b>\n`);
+      report += `\n`;
+      hasContent = true;
+    }
   }
 
   if (hasContent) {
-    await sendTelegramNotification(report);
-    APP_DATA.settings.lastDailyReport = today;
-    saveDB();
+    const header = isManual ? `📊 <b>Ручной отчет (${type==='full'?'Полный':(type==='orders'?'Заказы':'Задачи')})</b>` : `☀️ <b>Утренняя сводка ERP</b>`;
+    const finalMsg = `${header}\nДата: ${today}\n\n${report}<i>Отправлено из ERP системы</i>`;
+    
+    await sendTelegramNotification(finalMsg);
+    if (!isManual && type === 'full') {
+      APP_DATA.settings.lastDailyReport = today;
+      saveDB();
+    }
+    addLog(`Система: Отправлен отчет "${type}" в Telegram (${isManual ? 'вручную' : 'автоматически'})`);
+    if(isManual) alert("Отчет успешно отправлен в Telegram!");
+  } else if (isManual) {
+    alert("Нет актуальных данных для отчета данного типа.");
   }
 }
 
 // Core Renderer
+function escapeHtml(unsafe) {
+  if (unsafe == null) return '';
+  return String(unsafe)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+let dailyReportTimer = null;
+
 function render() {
   hideLoading(); // Always ensure loader is hidden before rendering
   try {
     const appContainer = document.getElementById('app');
     if (!appContainer) return;
+    if (STATE.theme === 'light') {
+      document.body.classList.add('light-theme');
+    } else {
+      document.body.classList.remove('light-theme');
+    }
+
     if (!STATE.user) {
+      if (dailyReportTimer) { clearInterval(dailyReportTimer); dailyReportTimer = null; }
       appContainer.innerHTML = renderLogin();
       attachLoginEvents();
     } else {
+      const activeSidebar = document.getElementById('sidebar')?.classList.contains('active');
+      const activeOverlay = document.getElementById('sidebarOverlay')?.classList.contains('active');
+      
       appContainer.innerHTML = renderDashboard() + renderModal();
       attachDashboardEvents();
+      
+      if (activeSidebar) document.getElementById('sidebar')?.classList.add('active');
+      if (activeOverlay) document.getElementById('sidebarOverlay')?.classList.add('active');
+      
+      if (!dailyReportTimer) dailyReportTimer = setInterval(() => runDailyReport(), 60000);
       checkLowStock(); // Run after render so it doesn't block UI
+      if (STATE.view === 'admin_finance') {
+        setTimeout(() => initFinanceCharts(), 50);
+      }
     }
     if (window.lucide) lucide.createIcons();
   } catch(err) {
@@ -248,7 +321,7 @@ function render() {
       appContainer.innerHTML = `
         <div style="position:fixed;top:0;left:0;right:0;bottom:0;background:#111;display:flex;align-items:center;justify-content:center;z-index:9999;">
           <div style="background:#1e1e1e;border:2px solid #e74c3c;border-radius:12px;padding:30px;max-width:500px;text-align:center;">
-            <h3 style="color:#e74c3c;margin-top:0;">⚠️ Ошибка интерфейса</h3>
+            <h3 style="color:#e74c3c;margin-top:0;">⚠️ Ошибка интерфейса (ERP V2.0.1)</h3>
             <p style="color:#ccc;font-size:13px;font-family:monospace;text-align:left;background:#0a0a0a;padding:10px;border-radius:6px;word-break:break-all;">${err.message}</p>
             <button onclick="location.reload()" style="background:#e74c3c;color:white;border:none;padding:10px 24px;border-radius:6px;cursor:pointer;margin-top:10px;">🔄 Перезагрузить</button>
           </div>
@@ -263,6 +336,12 @@ function updateView(newView) {
   saveSession();
   render();
 }
+
+window.toggleTheme = function() {
+  STATE.theme = (STATE.theme === 'light' ? 'dark' : 'light');
+  saveSession();
+  render();
+};
 
 // Activity Audit Logger
 function addLog(actionDescription) {
@@ -321,10 +400,15 @@ async function sendTelegramNotification(message) {
 function renderLogin() {
   return `
     <div class="login-container animate-fade-in">
-      <div class="glass-panel login-box">
+      <div class="login-box glass-panel">
         <div class="login-header">
-          <h1>СтройКомплект</h1>
-          <p>Вход в систему ERP</p>
+           <div style="display:flex; justify-content:center; margin-bottom:20px;">
+             <div style="background:var(--primary-glow); padding:15px; border-radius:18px; border: 1px solid var(--primary);">
+               <i data-lucide="shield-check" style="width:40px; height:40px; color:var(--primary);"></i>
+             </div>
+           </div>
+           <h1>ERP CORE</h1>
+           <p style="text-transform:uppercase; letter-spacing:2px; font-size:11px; font-weight:700;">Система управления СТРОЙДОМ</p>
         </div>
         
         <div class="role-selector" id="roleSelector">
@@ -333,24 +417,20 @@ function renderLogin() {
           <div class="role-btn" data-role="client">Клиент</div>
         </div>
         
-        <form id="loginForm">
+        <form id="loginForm" autocomplete="off">
           <div class="input-block">
-            <label>Имя пользователя (Логин)</label>
-            <input type="text" id="username" placeholder="Например: alex" required>
+            <label><i data-lucide="user" style="width:12px;height:12px;vertical-align:middle;"></i> Логин</label>
+            <input type="text" id="username" placeholder="Логин" required autocomplete="off">
           </div>
           <div class="input-block">
-            <label>Пароль</label>
-            <input type="password" id="password" placeholder="••••••••" value="123" required>
+            <label><i data-lucide="key" style="width:12px;height:12px;vertical-align:middle;"></i> Пароль</label>
+            <input type="password" id="password" placeholder="••••••••" required autocomplete="current-password">
           </div>
-          <button type="submit" class="btn" style="width: 100%; margin-top: 10px;">Войти</button>
-          <div id="loginError" style="color:#ff7b72; font-size:13px; text-align:center; margin-top:12px; display:none;"></div>
+          <button type="submit" class="btn" style="width: 100%; margin-top: 10px; height:50px; font-size:16px;">
+            ВХОД В СИСТЕМУ <i data-lucide="arrow-right" style="width:18px;height:18px;"></i>
+          </button>
+          <div id="loginError" style="color:var(--danger); font-size:13px; text-align:center; margin-top:16px; font-weight:600; display:none;"></div>
         </form>
-        
-        <div style="margin-top:24px; font-size:12px; color:var(--text-muted); text-align:center; line-height: 1.5;">
-           Логины сотрудников: alex, marina, igor, elena, dmitry<br/>
-           Логин клиента: peter<br/>
-           Пароль для всех: 123
-        </div>
       </div>
     </div>
   `;
@@ -364,91 +444,122 @@ function renderDashboard() {
   if (isEmployee) {
     navLinks = `
       <div class="nav-item ${STATE.view === 'employee_plans' ? 'active' : ''}" data-view="employee_plans">
-        <i data-lucide="check-square"></i> Задачи
+        <i data-lucide="check-square"></i> <span>Задачи</span>
       </div>
       <div class="nav-item ${STATE.view === 'employee_orders' ? 'active' : ''}" data-view="employee_orders">
-        <i data-lucide="trello"></i> Заказы (CRM)
+        <i data-lucide="trello"></i> <span>Заказы (CRM)</span>
       </div>
       <div class="nav-item ${STATE.view === 'employee_inventory' ? 'active' : ''}" data-view="employee_inventory">
-        <i data-lucide="package"></i> Склад
+        <i data-lucide="package"></i> <span>Склад</span>
+      </div>
+      <div class="nav-item ${STATE.view === 'employee_chat' ? 'active' : ''}" data-view="employee_chat">
+        <i data-lucide="message-circle"></i> <span>Чат (Связь)</span>
       </div>
       ${isAdmin ? `
-      <div class="nav-item ${STATE.view === 'admin_tasks_history' ? 'active' : ''}" data-view="admin_tasks_history" style="margin-top:20px; border-top: 1px solid var(--border); border-radius: 0; padding-top:20px;">
-        <i data-lucide="archive"></i> Архив задач
+      <div style="margin: 20px 16px 10px; font-size: 10px; font-weight: 800; color: var(--text-dim); text-transform: uppercase; letter-spacing: 1px;">Администрирование</div>
+      <div class="nav-item ${STATE.view === 'admin_tasks_history' ? 'active' : ''}" data-view="admin_tasks_history">
+        <i data-lucide="archive"></i> <span>Архив задач</span>
       </div>
       <div class="nav-item ${STATE.view === 'admin_requests_history' ? 'active' : ''}" data-view="admin_requests_history">
-        <i data-lucide="inbox"></i> Архив склада
+        <i data-lucide="inbox"></i> <span>Архив склада</span>
       </div>
       <div class="nav-item ${STATE.view === 'admin_finance' ? 'active' : ''}" data-view="admin_finance">
-        <i data-lucide="calculator"></i> Финансы
+        <i data-lucide="calculator"></i> <span>Финансы</span>
       </div>
       <div class="nav-item ${STATE.view === 'admin_settings' ? 'active' : ''}" data-view="admin_settings">
-        <i data-lucide="shield"></i> Учетные записи
+        <i data-lucide="shield"></i> <span>Сотрудники</span>
       </div>
       <div class="nav-item ${STATE.view === 'admin_logs' ? 'active' : ''}" data-view="admin_logs">
-        <i data-lucide="activity"></i> Журнал действий
+        <i data-lucide="activity"></i> <span>Журнал</span>
       </div>` : ''}
     `;
   } else {
     navLinks = `
       <div class="nav-item ${STATE.view === 'client_orders' ? 'active' : ''}" data-view="client_orders">
-        <i data-lucide="list"></i> My Orders
+        <i data-lucide="shopping-bag"></i> <span>Мои Заказы</span>
       </div>
     `;
   }
 
-  const roleBadge = STATE.user.role === 'admin' 
-    ? '<span style="background: var(--accent); color: white; padding: 2px 8px; border-radius: 12px; font-size: 11px; margin-left: 8px;">Админ</span>' 
-    : '';
-
+  const roleLabel = isAdmin ? 'АДМИНИСТРАТОР' : (STATE.user.role === 'client' ? 'КЛИЕНТ' : 'ИСПОЛНИТЕЛЬ');
   const unreadNotifs = APP_DATA.notifications.filter(n => n.userId === STATE.user.id && !n.read);
 
   return `
     <div class="dashboard animate-fade-in">
-      <div class="sidebar">
+      <div class="sidebar-overlay" id="sidebarOverlay" onclick="toggleSidebar()"></div>
+      <div class="sidebar" id="sidebar">
         <div class="sidebar-header">
-          СтройКомплект
+           <i data-lucide="box" style="width:32px; height:32px; color:var(--primary);"></i>
+           <div style="line-height:1.1;">
+             <div style="font-size:18px; letter-spacing:1px;">СТРОЙДОМ</div>
+             <div style="font-size:10px; color:var(--text-dim); letter-spacing:2px; font-weight:500;">ERP SYSTEM</div>
+           </div>
         </div>
         <div class="sidebar-nav">
           ${navLinks}
         </div>
+        <div style="padding: 20px; border-top: 1px solid var(--border); background: rgba(0,0,0,0.2);">
+           <div style="display:flex; align-items:center; gap:12px; margin-bottom:12px;">
+             <div style="width:36px; height:36px; background:var(--primary); border-radius:10px; display:flex; align-items:center; justify-content:center; color:#000; font-weight:800; font-size:16px;">
+               ${STATE.user.name[0]}
+             </div>
+             <div style="overflow:hidden;">
+               <div style="font-size:13px; font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${STATE.user.name}</div>
+               <div style="font-size:10px; color:var(--primary); font-weight:600;">${roleLabel}</div>
+             </div>
+           </div>
+           <button class="btn btn-secondary" id="logoutBtn" style="width:100%; justify-content:center; height:36px; font-size:12px;">
+             <i data-lucide="log-out" style="width:14px; height:14px;"></i> ВЫЙТИ
+           </button>
+        </div>
       </div>
+      
       <div class="main-content">
         <div class="topbar">
-          <div class="topbar-title">
-            ${getViewTitle()}
-            <span id="cloudStatus" style="margin-left:12px; font-size:10px; padding:2px 8px; border-radius:10px; vertical-align:middle; 
-               background:${CLOUD_STATUS==='online' ? 'rgba(46, 204, 113, 0.2)' : (CLOUD_STATUS==='error' ? 'rgba(231, 76, 60, 0.2)' : 'rgba(255,165,0,0.2)')};
-               color:${CLOUD_STATUS==='online' ? '#2ecc71' : (CLOUD_STATUS==='error' ? '#e74c3c' : '#ffa500')};">
-               <i data-lucide="${CLOUD_STATUS==='online' ? 'cloud-check' : (CLOUD_STATUS==='error' ? 'cloud-off' : 'cloud-lightning')}" style="width:12px;height:12px; vertical-align:text-top; margin-right:4px;"></i>
-               Cloud: ${CLOUD_STATUS==='online' ? 'Синхронизировано' : (CLOUD_STATUS==='error' ? 'Ошибка связи' : 'Подключение...')}
-            </span>
+          <div style="display:flex; align-items:center; gap:16px;">
+            <div id="menuToggle" onclick="toggleSidebar()">
+              <i data-lucide="menu"></i>
+            </div>
+            <div class="topbar-title">
+              <span style="color:var(--text-muted); font-weight:400; font-size:16px; vertical-align:middle; margin-right:8px;">Доска /</span> 
+              ${getViewTitle()}
+            </div>
           </div>
           <div class="user-profile">
-            <div style="position:relative; margin-right: 16px;">
+            <span id="cloudStatus" style="font-size:11px; font-weight:600; padding:8px 16px; border-radius:12px; display:flex; align-items:center; gap:8px;
+               background: ${CLOUD_STATUS==='online' ? 'rgba(16, 185, 129, 0.1)' : (CLOUD_STATUS==='error' ? 'rgba(239, 68, 68, 0.1)' : 'rgba(245, 158, 11, 0.1)')};
+               color: ${CLOUD_STATUS==='online' ? 'var(--success)' : (CLOUD_STATUS==='error' ? 'var(--danger)' : 'var(--warning)')};
+               border: 1px solid ${CLOUD_STATUS==='online' ? 'rgba(16, 185, 129, 0.2)' : (CLOUD_STATUS==='error' ? 'rgba(239, 68, 68, 0.2)' : 'rgba(245, 158, 11, 0.2)')};">
+               <i data-lucide="${CLOUD_STATUS==='online' ? 'cloud-check' : (CLOUD_STATUS==='error' ? 'cloud-off' : 'cloud-lightning')}" style="width:14px;height:14px;"></i>
+               ${CLOUD_STATUS==='online' ? 'ONLINE' : (CLOUD_STATUS==='error' ? 'CONNECTION ERROR' : 'CONNECTING...')}
+            </span>
+
+            <div style="position:relative; display:flex; gap:8px;">
+               <button class="notif-btn" onclick="toggleTheme()" title="Сменить тему">
+                 <i data-lucide="${STATE.theme === 'light' ? 'moon' : 'sun'}"></i>
+               </button>
                <button class="notif-btn" onclick="toggleNotif()"><i data-lucide="bell"></i>
                  ${unreadNotifs.length > 0 ? `<span class="notif-badge">${unreadNotifs.length}</span>` : ''}
                </button>
-               <div id="notifDropdown" class="notif-dropdown" style="display:none;">
-                 <div style="padding:12px; font-weight:700; border-bottom:1px solid var(--border); color:var(--primary);">Уведомления</div>
-                 ${APP_DATA.notifications.filter(n => n.userId === STATE.user.id).slice(0, 8).map(n => `
-                   <div class="notif-item ${!n.read ? 'unread' : ''}" onclick="markNotifRead(${n.id})">
-                      <div style="font-size:10px; color:var(--text-muted); margin-bottom:4px;">${n.date}</div>
-                      <div>${n.text}</div>
-                   </div>
-                 `).join('') || '<div style="padding:16px; color:var(--text-muted); font-size:12px; text-align:center;">Нет новых уведомлений</div>'}
+               <div id="notifDropdown" class="notif-dropdown" style="display:none; transform-origin: top right; animation: fadeIn 0.3s ease;">
+                 <div style="padding:16px; font-weight:700; border-bottom:1px solid var(--border); color:var(--text-main); font-size:14px;">Уведомления</div>
+                 <div style="max-height:300px; overflow-y:auto;">
+                   ${APP_DATA.notifications.filter(n => n.userId === STATE.user.id).slice(0, 8).map(n => `
+                     <div class="notif-item ${!n.read ? 'unread' : ''}" onclick="markNotifRead(${n.id})">
+                        <div style="font-size:10px; color:var(--text-muted); margin-bottom:4px; font-weight:700;">${n.date}</div>
+                        <div style="color:var(--text-main); line-height:1.4;">${n.text}</div>
+                     </div>
+                   `).join('') || '<div style="padding:32px; color:var(--text-dim); font-size:12px; text-align:center;">Новых уведомлений нет</div>'}
+                 </div>
                </div>
             </div>
-            
-            <i data-lucide="user"></i>
-            <span>${STATE.user.name}</span>
-            ${roleBadge}
-            <button class="logout-btn" id="logoutBtn" title="Выйти" style="margin-left:8px;">
-              <i data-lucide="log-out"></i>
-            </button>
           </div>
         </div>
         
+        <div class="stats-row">
+           ${renderViewStats()}
+        </div>
+
         <div class="content-area animate-fade-in">
           ${renderCurrentViewContent()}
         </div>
@@ -457,8 +568,52 @@ function renderDashboard() {
   `;
 }
 
+function renderViewStats() {
+  const isAdmin = STATE.user.role === 'admin';
+  const data = [];
+  
+  switch(STATE.view) {
+    case 'employee_plans':
+      const myPlans = APP_DATA.plans.filter(p => isAdmin ? p.status!=='archived' : (p.empId === STATE.user.id && p.status!=='archived'));
+      data.push({ label: 'Всего задач', value: myPlans.length, icon: 'list' });
+      data.push({ label: 'В работе', value: myPlans.filter(p => p.status==='in_progress').length, icon: 'clock', color:'var(--primary)' });
+      data.push({ label: 'Завершено', value: myPlans.filter(p => p.status==='done').length, icon: 'check-circle', color:'var(--success)' });
+      break;
+    case 'employee_inventory':
+      data.push({ label: 'Позиций на складе', value: APP_DATA.inventory.length, icon: 'package' });
+      data.push({ label: 'Критический остаток', value: APP_DATA.inventory.filter(i => i.stock <= 5).length, icon: 'alert-triangle', color:'var(--danger)' });
+      data.push({ label: 'Активные заявки', value: APP_DATA.requests.filter(r => r.status!=='Архивировано').length, icon: 'file-text' });
+      break;
+    case 'employee_orders':
+    case 'client_orders':
+      const orders = STATE.view === 'client_orders' ? APP_DATA.orders.filter(o => o.client.includes(STATE.user.name)) : APP_DATA.orders;
+      data.push({ label: 'Всего заказов', value: orders.length, icon: 'shopping-cart' });
+      data.push({ label: 'В процессе', value: orders.filter(o => o.stage!=='Оплачен').length, icon: 'activity', color:'var(--primary)' });
+      data.push({ label: 'Общая сумма', value: orders.reduce((s, o) => s + o.sum, 0).toLocaleString() + ' сом', icon: 'credit-card', color:'var(--success)' });
+      break;
+    default:
+      data.push({ label: 'Система ERP', value: 'ONLINE', icon: 'shield-check' });
+      data.push({ label: 'Версия', value: '2.0.1', icon: 'code' });
+      data.push({ label: 'База данных', value: 'Cloud Firestore', icon: 'database' });
+  }
+  
+  return data.map(s => `
+    <div class="stat-card">
+      <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+        <div class="stat-label">${s.label}</div>
+        <div style="background:rgba(255,255,255,0.03); padding:8px; border-radius:10px; color:${s.color || 'var(--text-dim)'};">
+          <i data-lucide="${s.icon}" style="width:16px; height:16px;"></i>
+        </div>
+      </div>
+      <div class="stat-value" style="color:${s.color || 'var(--text-main)'};">${s.value}</div>
+    </div>
+  `).join('');
+}
+
 function renderModal() {
   if (!MODAL.active) return '';
+  const isReadOnly = !MODAL.onSubmit;
+  
   return `
     <div class="modal-overlay active">
       <div class="modal-content">
@@ -469,8 +624,8 @@ function renderModal() {
         <form id="modalForm">
           ${MODAL.html}
           <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:24px;">
-            <button type="button" class="btn btn-secondary" onclick="closeModal()">Отмена</button>
-            <button type="submit" class="btn">Сохранить</button>
+            <button type="button" class="btn btn-secondary" onclick="closeModal()">${isReadOnly ? 'Закрыть' : 'Отмена'}</button>
+            ${isReadOnly ? '' : '<button type="submit" class="btn">Сохранить</button>'}
           </div>
         </form>
       </div>
@@ -499,14 +654,21 @@ function renderCurrentViewContent() {
     // ----------- PLANS -----------
     case 'employee_plans': {
       let basePlans = isAdmin ? APP_DATA.plans : APP_DATA.plans.filter(p => p.empId === STATE.user.id);
+      // Filter by Employee
       if (isAdmin && STATE.plansFilter && String(STATE.plansFilter) !== 'all') {
          basePlans = basePlans.filter(p => String(p.empId) === String(STATE.plansFilter));
       }
 
+      // Filter by Category
+      if (isAdmin && STATE.filterCat) {
+         const catEmps = APP_DATA.users.filter(u => u.category === STATE.filterCat).map(u => u.id);
+         basePlans = basePlans.filter(p => catEmps.includes(p.empId));
+      }
+
       const displayPlans = basePlans.sort((a, b) => {
          if (isAdmin) {
-             const empNameA = (APP_DATA.users.find(u => u.id == a.empId) || {}).name || 'ЯЯЯ';
-             const empNameB = (APP_DATA.users.find(u => u.id == b.empId) || {}).name || 'ЯЯЯ';
+             const empNameA = (APP_DATA.users.find(u => u.id == a.empId) || {}).name ||'';
+             const empNameB = (APP_DATA.users.find(u => u.id == b.empId) || {}).name ||'';
              const nameCmp = empNameA.localeCompare(empNameB);
              if (nameCmp !== 0) return nameCmp;
          }
@@ -515,35 +677,36 @@ function renderCurrentViewContent() {
       
       const renderPlanCard = (p) => {
         const emp = APP_DATA.users.find(u => u.id == p.empId);
-        const empName = emp ? emp.name : 'Неизвестный';
-        const urgencyBadge = p.urgency === 'urgent' 
-          ? `<span style="background:rgba(192, 57, 43, 0.2); color:var(--danger); padding:4px 8px; border-radius:4px; font-weight:800; font-size:10px; text-transform:uppercase;">🔥 Срочно</span>`
-          : ``;
+        const empName = emp ? escapeHtml(emp.name) : 'Неизвестный';
+        const isUrgent = p.urgency === 'urgent';
 
         return `
-          <div style="background: rgba(255,255,255,0.05); padding:16px; border-radius:8px; border: 1px solid var(--border); ${p.urgency === 'urgent' ? 'border-left: 4px solid var(--danger);' : ''}">
-            <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom: 8px;">
-              <div style="font-weight:600; font-size:15px; line-height:1.4;">${p.title}</div>
-              ${urgencyBadge}
-            </div>
+          <div class="glass-panel" style="padding:20px; position:relative; overflow:hidden; border-left: 4px solid ${isUrgent ? 'var(--danger)' : 'var(--border)'};">
+            ${isUrgent ? '<div style="position:absolute; top:0; right:0; background:var(--danger); color:white; font-size:9px; padding:2px 8px; font-weight:800; border-bottom-left-radius:8px; text-transform:uppercase; letter-spacing:1px;">Срочно</div>' : ''}
             
-            <div style="color:var(--text-muted); font-size:11px; margin-bottom: 8px;"><i data-lucide="calendar" style="width:10px; height:10px;"></i> Срок: ${p.date || 'Не указан'}</div>
-
-            <div style="display:flex; gap:8px; align-items:center; margin-bottom:12px;">
-              ${isAdmin ? `<span style="background:rgba(243, 156, 18, 0.1); color:var(--text-muted); padding:4px 8px; border-radius:4px; font-weight:600; font-size:10px; text-transform:uppercase;">👷 ${empName}</span>` : ''}
+            <div style="font-weight:700; font-size:16px; margin-bottom:12px; line-height:1.3; color:var(--text-main);">${escapeHtml(p.title)}</div>
+            
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+               <div style="font-size:12px; color:var(--text-muted); display:flex; align-items:center; gap:6px;">
+                 <i data-lucide="calendar" style="width:14px; height:14px;"></i> ${p.date || 'Без даты'}
+               </div>
+               ${isAdmin ? `<div style="font-size:11px; color:var(--primary); font-weight:700;">👷 ${empName}</div>` : ''}
             </div>
 
-            <div style="display:flex; gap:8px; justify-content:space-between; align-items:center;">
-              <div style="display:flex; gap:8px;">
-                ${!isAdmin && p.status === 'open' ? `<button class="btn" style="padding:6px 12px; font-size:10px;" onclick="changePlanStatus(${p.id}, 'in_progress')">Взять в работу</button>` : ''}
-                ${!isAdmin && p.status === 'in_progress' ? `<button class="btn" style="background:var(--success); color:white; padding:6px 12px; font-size:10px;" onclick="changePlanStatus(${p.id}, 'done')">✅ Завершить</button>` : ''}
-                <button class="btn btn-secondary" style="padding:6px 12px; font-size:10px;" onclick="openTaskComments(${p.id})"><i data-lucide="message-square" style="width:12px;height:12px; margin-right:4px;"></i> Обсуждение ${(p.comments && p.comments.length) ? `(${p.comments.length})` : ''}</button>
+            <div style="display:flex; gap:8px; justify-content:space-between; align-items:center; border-top:1px solid var(--border); padding-top:16px;">
+              <div style="display:flex; gap:6px;">
+                ${!isAdmin && p.status === 'open' ? `<button class="btn" style="padding:6px 12px; font-size:11px;" onclick="changePlanStatus(${p.id}, 'in_progress')">В работу</button>` : ''}
+                ${!isAdmin && p.status === 'in_progress' ? `<button class="btn" style="background:var(--success); color:#000; padding:6px 12px; font-size:11px;" onclick="changePlanStatus(${p.id}, 'done')">Готово</button>` : ''}
+                <button class="btn btn-secondary" style="padding:6px 10px;" onclick="openTaskComments(${p.id})" title="Комментарии">
+                  <i data-lucide="message-square" style="width:14px;height:14px;"></i>
+                  ${(p.comments && p.comments.length) ? `<span style="font-size:10px; margin-left:4px;">${p.comments.length}</span>` : ''}
+                </button>
               </div>
               ${isAdmin ? `
-              <div style="display:flex; gap:4px;">
-                ${p.status === 'done' ? `<button class="btn btn-secondary" style="padding:6px; color:var(--success);" title="Завершить и убрать в Архив" onclick="archivePlan(${p.id})"><i data-lucide="folder-down" style="width:14px; height:14px;"></i></button>` : ''}
-                <button class="btn btn-secondary" style="padding:6px;" title="Изменить" onclick="editPlan(${p.id})"><i data-lucide="edit-2" style="width:14px; height:14px;"></i></button>
-                <button class="btn btn-secondary" style="padding:6px; color:var(--danger);" title="Удалить" onclick="deletePlan(${p.id})"><i data-lucide="trash-2" style="width:14px; height:14px;"></i></button>
+              <div class="flex-group-gap-4">
+                ${p.status === 'done' ? `<button class="btn btn-secondary" style="padding:8px; color:var(--success);" title="В Архив" onclick="archivePlan(${p.id})"><i data-lucide="folder-down" style="width:14px; height:14px;"></i></button>` : ''}
+                <button class="btn btn-secondary" style="padding:8px;" title="Изменить" onclick="editPlan(${p.id})"><i data-lucide="edit-2" style="width:14px; height:14px;"></i></button>
+                <button class="btn btn-secondary" style="padding:8px; color:var(--danger);" title="Удалить" onclick="deletePlan(${p.id})"><i data-lucide="trash-2" style="width:14px; height:14px;"></i></button>
               </div>
               ` : ''}
             </div>
@@ -555,38 +718,60 @@ function renderCurrentViewContent() {
         `<option value="${u.id}" ${String(STATE.plansFilter) === String(u.id) ? 'selected' : ''}>${u.name}</option>`
       ).join('');
 
-      const filterHtml = isAdmin ? `
-        <div style="display:flex; align-items:center; gap: 12px;">
-           <select style="background:rgba(255,255,255,0.05); color:var(--text-main); border:1px solid var(--border); border-radius:4px; padding:8px 12px; font-size:13px; outline:none;" onchange="filterPlansByEmp(this.value)">
-             <option value="all" ${!STATE.plansFilter || String(STATE.plansFilter) === 'all' ? 'selected' : ''}>📋 Все задачи (Все сотрудники)</option>
-             ${empOptions}
-           </select>
-        </div>
-      ` : '';
+      const catOptions = (APP_DATA.settings?.workerCategories || []).map(c => 
+        `<option value="${c}" ${STATE.filterCat === c ? 'selected' : ''}>📁 Группа: ${c}</option>`
+      ).join('');
 
       return `
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 24px;">
-           ${filterHtml ? filterHtml : `<p style="color:var(--text-muted);">Ваши рабочие поручения по фазам.</p>`}
-           ${isAdmin ? '<button class="btn" onclick="addPlan()"><i data-lucide="plus" style="width:16px; height:16px; vertical-align:middle;"></i> Добавить задачу</button>' : ''}
+        <div class="flex-header margin-bottom-32">
+           <div class="flex-group">
+             ${isAdmin ? `
+               <select class="btn btn-secondary" style="text-align:left; background:var(--bg-card); padding:8px 12px; font-size:12px; min-width:180px;" onchange="STATE.filterCat = this.value; render();">
+                 <option value="">Все группы</option>
+                 ${catOptions}
+               </select>
+               <select class="btn btn-secondary" style="text-align:left; background:var(--bg-card); padding:8px 12px; font-size:12px; min-width:180px;" onchange="filterPlansByEmp(this.value)">
+                 <option value="all">👥 Все сотрудники</option>
+                 ${empOptions}
+               </select>
+             ` : '<h3 style="margin:0;">Мои текущие задачи</h3>'}
+           </div>
+           ${isAdmin ? `
+             <div class="flex-group mobile-flex-stack">
+               <button class="btn btn-secondary" onclick="showPlanMap()"><i data-lucide="map"></i> Карта</button>
+               <button class="btn btn-secondary" onclick="runDailyReport(true, 'tasks')"><i data-lucide="send"></i> Сводка задач</button>
+               <button class="btn" onclick="addPlan()"><i data-lucide="plus"></i> Новая задача</button>
+             </div>
+           ` : `
+             <div class="flex-group mobile-flex-stack">
+               <button class="btn btn-secondary" onclick="showPlanMap()"><i data-lucide="map"></i> Карта объектов</button>
+             </div>
+           `}
         </div>
-        <div class="grid-cards">
-          <div class="glass-panel card" style="border-top-color: var(--text-muted);">
-            <div class="card-title" style="color:var(--text-muted);"><i data-lucide="circle"></i> Ожидают выполнения</div>
-            <div style="display:flex; flex-direction:column; gap:12px;">
-               ${displayPlans.filter(p => p.status === 'open').map(renderPlanCard).join('') || '<div style="color:var(--text-muted); font-size:13px;">Нет задач</div>'}
+
+        <div class="kanban-board">
+          <div class="kanban-col">
+            <div class="kanban-header">
+              <div class="kanban-title"><i data-lucide="circle" style="color:var(--text-dim);"></i> Ожидают</div>
+              <div class="kanban-badge">${displayPlans.filter(p => p.status === 'open').length}</div>
             </div>
+            ${displayPlans.filter(p => p.status === 'open').map(renderPlanCard).join('') || '<div style="color:var(--text-dim); text-align:center; padding:40px; border:1px dashed var(--border); border-radius:12px; font-size:12px;">Задач нет</div>'}
           </div>
-          <div class="glass-panel card" style="border-top-color: var(--primary);">
-            <div class="card-title" style="color:var(--primary);"><i data-lucide="clock"></i> В процессе (В работе)</div>
-            <div style="display:flex; flex-direction:column; gap:12px;">
-               ${displayPlans.filter(p => p.status === 'in_progress').map(renderPlanCard).join('') || '<div style="color:var(--text-muted); font-size:13px;">Пусто</div>'}
+          
+          <div class="kanban-col">
+            <div class="kanban-header">
+              <div class="kanban-title"><i data-lucide="clock" style="color:var(--primary);"></i> В процессе</div>
+              <div class="kanban-badge">${displayPlans.filter(p => p.status === 'in_progress').length}</div>
             </div>
+            ${displayPlans.filter(p => p.status === 'in_progress').map(renderPlanCard).join('') || '<div style="color:var(--text-dim); text-align:center; padding:40px; border:1px dashed var(--border); border-radius:12px; font-size:12px;">Пусто</div>'}
           </div>
-          <div class="glass-panel card" style="border-top-color: var(--success);">
-            <div class="card-title" style="color:var(--success);"><i data-lucide="check-circle-2"></i> Завершенные</div>
-            <div style="display:flex; flex-direction:column; gap:12px;">
-               ${displayPlans.filter(p => p.status === 'done').map(renderPlanCard).join('') || '<div style="color:var(--text-muted); font-size:13px;">Пусто</div>'}
+
+          <div class="kanban-col">
+            <div class="kanban-header">
+              <div class="kanban-title"><i data-lucide="check-circle" style="color:var(--success);"></i> Выполнено</div>
+              <div class="kanban-badge">${displayPlans.filter(p => p.status === 'done').length}</div>
             </div>
+            ${displayPlans.filter(p => p.status === 'done').map(renderPlanCard).join('') || '<div style="color:var(--text-dim); text-align:center; padding:40px; border:1px dashed var(--border); border-radius:12px; font-size:12px;">Пусто</div>'}
           </div>
         </div>
       `;
@@ -598,8 +783,8 @@ function renderCurrentViewContent() {
       const displayRequests = isAdmin ? activeRequests : activeRequests.filter(r => r.empName === STATE.user.name);
       
       const requestsHtml = `
-         <div style="margin-top: 48px; display:flex; justify-content:space-between; margin-bottom: 24px;">
-           <h3>Заявки на закупку/выдачу товара</h3>
+         <div class="flex-header margin-top-48 margin-bottom-24" style="flex-wrap:wrap;">
+           <h3 style="margin:0;">Заявки на закупку/выдачу товара</h3>
            <button class="btn btn-secondary" onclick="createRequest()"><i data-lucide="file-plus" style="width:16px; height:16px; vertical-align:middle;"></i> Оставить заявку</button>
          </div>
          <table style="width:100%; border-collapse: collapse; text-align:left;">
@@ -615,8 +800,8 @@ function renderCurrentViewContent() {
           <tbody>
             ${displayRequests.map(r => `
               <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
-                <td style="padding: 12px;">${r.empName}</td>
-                <td style="padding: 12px; font-weight:500;">${r.itemName}</td>
+                <td style="padding: 12px;">${escapeHtml(r.empName)}</td>
+                <td style="padding: 12px; font-weight:500;">${escapeHtml(r.itemName)}</td>
                 <td style="padding: 12px;">${r.qty} шт.</td>
                 <td style="padding: 12px;">
                    <span style="background:${r.status === 'Одобрено' ? 'rgba(39, 174, 96, 0.2)' : (r.status === 'Отклонено' ? 'rgba(192, 57, 43, 0.2)' : 'rgba(255,255,255,0.1)')}; 
@@ -638,11 +823,11 @@ function renderCurrentViewContent() {
 
       return `
         <div class="glass-panel" style="padding:24px;">
-           <div style="display:flex; justify-content:space-between; margin-bottom: 24px;">
-             <h3>Товарные остатки склада</h3>
-             <div style="display:flex; gap:8px; align-items:center;">
-               <button class="btn btn-secondary" onclick="startQRScanner()"><i data-lucide="scan" style="width:16px; height:16px; vertical-align:middle; margin-right:4px;"></i> Сканер QR</button>
-               <button class="btn btn-secondary" onclick="exportExcel('inventory')"><i data-lucide="download" style="width:16px; height:16px; vertical-align:middle;"></i> Скачать Excel</button>
+           <div class="flex-header margin-bottom-24" style="flex-wrap:wrap;">
+             <h3 style="margin:0;">Товарные остатки склада</h3>
+             <div class="flex-group">
+               <button class="btn btn-secondary" onclick="startQRScanner()"><i data-lucide="scan" style="width:14px; height:14px; margin-right:4px;"></i> Сканер QR</button>
+               <button class="btn btn-secondary" onclick="exportExcel('inventory')"><i data-lucide="download" style="width:14px; height:14px;"></i> Excel</button>
                ${isAdmin ? `
                  <label class="btn btn-secondary" style="cursor:pointer; margin:0;" title="Загрузить список товаров из Excel">
                    <i data-lucide="upload" style="width:16px; height:16px; vertical-align:middle;"></i> Загрузить Excel
@@ -668,8 +853,8 @@ function renderCurrentViewContent() {
               ${APP_DATA.inventory.map(item => `
                 <tr style="border-bottom: 1px solid rgba(255,255,255,0.05); ${item.stock <= 5 ? 'background: rgba(192, 57, 43, 0.05);' : ''}">
                   <td style="padding: 12px;">${item.id}</td>
-                  <td style="padding: 12px;"><span style="color:var(--primary); font-size:12px; text-transform:uppercase;">${item.category}</span></td>
-                  <td style="padding: 12px; font-weight: 500; ${item.stock <= 5 ? 'color:var(--danger);' : ''}">${item.name}</td>
+                  <td style="padding: 12px;"><span style="color:var(--primary); font-size:12px; text-transform:uppercase;">${escapeHtml(item.category)}</span></td>
+                  <td style="padding: 12px; font-weight: 500; ${item.stock <= 5 ? 'color:var(--danger);' : ''}">${escapeHtml(item.name)}</td>
                   <td style="padding: 12px;"><span style="background:${item.stock <= 5 ? 'var(--danger)' : 'var(--accent)'}; padding:4px 10px; border-radius:4px; font-size:13px; font-weight:700;">${item.stock} шт.</span></td>
                   <td style="padding: 12px;">${item.price.toLocaleString()} сом</td>
                   ${isAdmin ? `
@@ -691,67 +876,107 @@ function renderCurrentViewContent() {
     case 'employee_orders':
     case 'client_orders': {
       const forClient = STATE.view === 'client_orders';
-      // client sees only their orders by matching substring of their name
-      const orders = forClient ? APP_DATA.orders.filter(o => o.client.includes(STATE.user.name)) : APP_DATA.orders; 
+      let orders = forClient ? APP_DATA.orders.filter(o => o.client.includes(STATE.user.name)) : APP_DATA.orders; 
+      
+      if (!forClient && STATE.filterCat) {
+        orders = orders.filter(o => o.workerCategory === STATE.filterCat);
+      }
+
+      const isAdmin = STATE.user?.role === 'admin';
+      const catOptions = (APP_DATA.settings?.workerCategories || []).map(c => `
+         <option value="${c}" ${STATE.filterCat === c ? 'selected' : ''}>${c}</option>
+      `).join('');
 
       if (forClient) {
+        // ... (Client View stays the same)
         return `
-         <div class="glass-panel" style="padding:24px;">
-           <div style="display:flex; justify-content:space-between; align-items:flex-end; margin-bottom: 24px;">
-             <h3>Мои заказы</h3>
-             <button class="btn" onclick="clientCreateOrder()"><i data-lucide="plus" style="width:16px; height:16px; vertical-align:middle;"></i> Оставить новую заявку</button>
+         <div class="glass-panel" style="padding:32px;">
+           <div class="flex-header margin-bottom-32" style="flex-wrap:wrap;">
+             <h3 style="margin:0;">История моих заказов</h3>
+             <button class="btn" onclick="clientCreateOrder()"><i data-lucide="plus"></i> Новая заявка</button>
            </div>
-           <div style="display:flex; flex-direction:column; gap:12px;">
+           <div class="flex-col-gap-16">
               ${orders.map(order => `
-                <div style="background: rgba(255,255,255,0.02); border: 1px solid var(--border); padding:16px; border-radius:var(--radius); display:flex; justify-content:space-between; align-items:center;">
+                <div class="glass-panel flex-header-center" style="padding:24px; border-left:4px solid var(--primary);">
                   <div>
-                    <div style="font-weight:700; margin-bottom:4px; color:var(--primary);">${order.id} — ООО "СтройДом" (Поставщик)</div>
-                    <div style="font-size:12px; color:var(--text-muted)">Дата отгрузки: ${order.date}</div>
+                    <div style="font-weight:800; font-size:18px; color:var(--text-main); margin-bottom:4px;">${order.id}</div>
+                    <div style="font-size:13px; color:var(--text-dim);"><i data-lucide="clock" style="width:12px;height:12px;"></i> Ожидаемая дата: ${order.date}</div>
                   </div>
-                  <div style="display:flex; align-items:center; gap: 12px;">
-                    <span style="font-weight:800; font-size:16px; margin-right:16px;">${order.sum.toLocaleString()} сом</span>
-                    <span style="background:rgba(255,255,255,0.1); color:var(--text-main); font-weight:600; padding:6px 12px; border-radius:4px; font-size:12px;">${order.stage}</span>
-                    <button class="btn btn-secondary" style="padding:6px; margin-left:8px;" onclick="printInvoice('${order.id}')" title="Распечатать Акт"><i data-lucide="printer" style="width:14px; height:14px;"></i></button>
+                  <div class="flex-group-gap-24">
+                    <div style="text-align:right;">
+                      <div style="font-weight:800; font-size:22px; color:var(--primary);">${order.sum.toLocaleString()} сом</div>
+                      <span class="badge badge-info">${order.stage}</span>
+                    </div>
+                    <button class="btn btn-secondary" style="padding:12px;" onclick="printInvoice('${order.id}')" title="Печать">
+                      <i data-lucide="printer"></i>
+                    </button>
                   </div>
                 </div>
-              `).join('')}
+              `).join('') || '<div style="padding:48px; text-align:center; color:var(--text-dim);">У вас пока нет заказов.</div>'}
            </div>
         </div>`;
       }
 
       // Kanban CRM for Employees / Admins
       return `
-         <div style="margin-bottom: 24px; display:flex; justify-content:space-between; align-items:center;">
+         <div class="flex-header" style="margin-bottom: 32px; flex-wrap:wrap; gap:20px;">
            <div>
-             <h3 style="margin-bottom:8px;">Воронка заказов</h3>
-             <p style="color:var(--text-muted); font-size:13px;">Проводите карточки клиентов по этапам до успешной оплаты сделки.</p>
+             <h3 style="margin-bottom:4px;">Воронка продаж / Сделки</h3>
+             <p style="color:var(--text-muted); font-size:13px;">Управление жизненным циклом заказов клиентов.</p>
            </div>
-           ${isAdmin ? '<button class="btn" onclick="addOrder()"><i data-lucide="plus" style="width:16px; height:16px; vertical-align:middle;"></i> Новый лид (Заказ)</button>' : ''}
+            <div class="flex-group mobile-flex-stack">
+             <div style="display:flex; flex-direction:column; gap:4px; flex:1; min-width:180px;">
+                <label style="font-size:11px; font-weight:700; color:var(--text-dim);">ГРУППА РАБОТНИКОВ:</label>
+                <select style="background:var(--bg-card); border:1px solid var(--border); color:var(--text-main); padding:6px 12px; border-radius:8px; font-size:12px; width:100%;" onchange="STATE.filterCat = this.value; render();">
+                  <option value="">Все группы</option>
+                  ${catOptions}
+                </select>
+             </div>
+             ${isAdmin ? `
+                <div class="flex-group mobile-flex-stack" style="margin-top:15px;">
+                  <button class="btn btn-secondary" style="height:40px;" onclick="runDailyReport(true, 'orders')"><i data-lucide="send"></i> Сводка заказов</button>
+                  <button class="btn" style="height:40px;" onclick="addOrder()"><i data-lucide="plus"></i> Создать сделку</button>
+               </div>
+             ` : ''}
+           </div>
          </div>
          <div class="kanban-board">
            ${['Новый', 'В работе', 'Сдан', 'Оплачен'].map(stage => {
-              const borderMap = {'Новый': 'var(--text-muted)', 'В работе': 'var(--primary)', 'Сдан': '#9b59b6', 'Оплачен': 'var(--success)'};
+              const borderMap = {'Новый': 'var(--text-dim)', 'В работе': 'var(--primary)', 'Сдан': 'var(--secondary)', 'Оплачен': 'var(--success)'};
+              const colOrders = orders.filter(o => o.stage === stage);
+              const colSum = colOrders.reduce((a, b) => a + (b.sum || 0), 0);
+              
               return `
-                <div class="kanban-col" style="border-top-color: ${borderMap[stage]};">
-                  <div style="display:flex; justify-content:space-between;">
-                    <h4 style="font-size: 14px; text-transform: uppercase; letter-spacing: 0.5px;">${stage}</h4>
-                    <span style="color:var(--text-muted); font-size:12px; font-weight:700;">${APP_DATA.orders.filter(o => o.stage === stage).reduce((a, b) => a + b.sum, 0).toLocaleString()} сом</span>
+                <div class="kanban-col">
+                  <div class="kanban-header" style="border-bottom: 2px solid ${borderMap[stage]}; padding-bottom:12px; margin-bottom:4px;">
+                    <div>
+                      <div class="kanban-title">${stage}</div>
+                      <div style="font-size:11px; font-weight:700; color:var(--text-dim); margin-top:4px;">${colSum.toLocaleString()} сом ${STATE.filterCat ? `(${STATE.filterCat})` : ''}</div>
+                    </div>
+                    <div class="kanban-badge">${colOrders.length}</div>
                   </div>
                   
-                  ${APP_DATA.orders.filter(o => o.stage === stage).map(o => `
-                    <div class="glass-panel" style="background: rgba(255,255,255,0.03); padding: 16px; border: 1px solid var(--border); border-left: 3px solid ${borderMap[stage]};">
-                      <div style="font-weight:800; color:var(--text-main); margin-bottom:8px;">${o.id}</div>
-                      <div style="font-size:14px; margin-bottom:12px; color:var(--primary); font-weight:500;">👤 ${o.client}</div>
-                      <div style="font-size:12px; margin-bottom:12px; color:var(--text-muted);">До: ${o.date}</div>
-                      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
-                        <div style="font-weight:700; font-size:18px;">${o.sum.toLocaleString()} сом</div>
-                        ${isAdmin ? `<button class="btn btn-secondary" style="padding:4px; font-size:10px;" onclick="editOrderSum('${o.id}')" title="Изменить сумму"><i data-lucide="edit-2" style="width:12px;height:12px;"></i></button>` : ''}
+                  ${colOrders.map(o => `
+                    <div class="glass-panel" style="padding: 20px; border-left: 3px solid ${borderMap[stage]};">
+                      <div style="font-weight:800; color:var(--text-main); margin-bottom:12px; font-size:14px; display:flex; justify-content:space-between;">
+                        ${o.id}
+                        <div style="display:flex; gap:6px;">
+                          ${o.workerCategory ? `<span style="font-size:9px; background:var(--bg-main); padding:2px 6px; border-radius:4px; color:var(--primary); border:1px solid var(--primary);">${o.workerCategory}</span>` : ''}
+                          ${isAdmin ? `<button class="logout-btn" style="padding:0;" onclick="editOrderSum('${o.id}')"><i data-lucide="edit-3" style="width:12px;height:12px;"></i></button>` : ''}
+                        </div>
                       </div>
-                      <button class="btn btn-secondary" style="width:100%; font-size:11px; padding:8px 0; margin-bottom:4px; background: rgba(52, 152, 219, 0.1); color: #3498db; border-color: #3498db;" onclick="printInvoice('${o.id}')"><i data-lucide="printer" style="width:12px; height:12px; vertical-align:middle;"></i> Печать сметы/акта</button>
-                      ${isAdmin && stage !== 'Оплачен' ? `<button class="btn" style="width:100%; font-size:11px; padding:8px 0; margin-bottom:4px;" onclick="nextOrderStage('${o.id}')">Вперед <i data-lucide="chevron-right" style="width:12px; height:12px; vertical-align:middle;"></i></button>` : ''}
-                      ${isAdmin && stage !== 'Новый' ? `<button class="btn btn-secondary" style="width:100%; font-size:11px; padding:8px 0;" onclick="prevOrderStage('${o.id}')"><i data-lucide="chevron-left" style="width:12px; height:12px; vertical-align:middle;"></i> Назад</button>` : ''}
+                      <div style="font-size:15px; margin-bottom:4px; font-weight:700; color:var(--text-main);">👤 ${escapeHtml(o.client)}</div>
+                      <div style="font-size:12px; margin-bottom:16px; color:var(--text-dim); font-weight:500;">📅 Срок: ${o.date}</div>
+                      
+                      <div style="font-weight:800; font-size:20px; color:var(--text-main); margin-bottom:20px;">${o.sum.toLocaleString()} <span style="font-size:12px; color:var(--text-dim);">сом</span></div>
+                      
+                      <div style="display:flex; flex-direction:column; gap:8px;">
+                        <button class="btn btn-secondary" style="width:100%; font-size:11px; padding:8px 0;" onclick="printInvoice('${o.id}')"><i data-lucide="printer" style="width:12px;height:12px;"></i> Печать документов</button>
+                        ${isAdmin && stage !== 'Оплачен' ? `<button class="btn" style="width:100%; font-size:11px; padding:8px 0;" onclick="nextOrderStage('${o.id}')">Продвинуть <i data-lucide="chevron-right" style="width:12px;height:12px;"></i></button>` : ''}
+                        ${isAdmin && stage !== 'Новый' ? `<button class="btn btn-secondary" style="width:100%; font-size:11px; padding:8px 0;" onclick="prevOrderStage('${o.id}')"><i data-lucide="chevron-left" style="width:12px;height:12px;"></i> Вернуть назад</button>` : ''}
+                      </div>
                     </div>
-                  `).join('') || '<div style="font-size:12px; color:rgba(255,255,255,0.2); text-align:center;">Пусто</div>'}
+                  `).join('') || '<div style="font-size:12px; color:var(--text-dim); text-align:center; padding:32px; border:1px dashed var(--border); border-radius:12px;">Сделок нет</div>'}
                 </div>
               `;
            }).join('')}
@@ -763,39 +988,41 @@ function renderCurrentViewContent() {
     case 'admin_requests_history': {
       const archivedReqs = APP_DATA.requests.filter(r => r.status === 'Архивировано');
       return `
-        <div class="glass-panel" style="padding:24px;">
-           <div style="display:flex; justify-content:space-between; margin-bottom: 24px;">
+        <div class="glass-panel" style="padding:32px;">
+           <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 32px;">
              <div>
-               <h3>Архив складских операций</h3>
-               <p style="color:var(--text-muted); font-size:13px; margin-top:8px;">Историческая база данных выданных материалов и отклоненных заявок.</p>
+               <h3 style="margin:0;">Архив снабжения</h3>
+               <p style="color:var(--text-muted); font-size:13px; margin-top:8px;">История выданных и отклоненных материалов.</p>
              </div>
-             <button class="btn btn-secondary" onclick="exportExcel('requests')"><i data-lucide="download" style="width:16px; height:16px; vertical-align:middle;"></i> Скачать отчет в Excel</button>
+             <button class="btn btn-secondary" onclick="exportExcel('requests')"><i data-lucide="download"></i> Excel Отчет</button>
            </div>
            
-           <table style="width:100%; border-collapse: collapse; text-align:left;">
-            <thead>
-              <tr style="border-bottom: 1px solid var(--border);">
-                <th style="padding: 12px; color:var(--text-muted);">Инициатор</th>
-                <th style="padding: 12px; color:var(--text-muted);">Наименование</th>
-                <th style="padding: 12px; color:var(--text-muted);">Количество</th>
-                <th style="padding: 12px; color:var(--text-muted);">Прошлый Статус</th>
-                <th style="padding: 12px; color:var(--text-muted); text-align:right;">Управление</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${archivedReqs.map(r => `
-                 <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
-                   <td style="padding: 12px; font-weight:600; color:var(--primary);">${r.empName}</td>
-                   <td style="padding: 12px;">${r.itemName}</td>
-                   <td style="padding: 12px; color:var(--text-muted);">${r.qty} шт.</td>
-                   <td style="padding: 12px;"><span style="background:rgba(255,255,255,0.1); padding:4px 8px; border-radius:4px; font-size:11px; text-transform:uppercase;">${r.prevStatus || 'Отработана'}</span></td>
-                   <td style="padding: 12px; text-align:right;">
-                     <button class="btn btn-secondary" style="padding:6px; color:var(--danger);" onclick="deleteRequest(${r.id})" title="Удалить навсегда"><i data-lucide="trash-2" style="width:14px;height:14px;"></i></button>
-                   </td>
-                 </tr>
-              `).join('') || `<tr><td colspan="5" style="padding:24px; color:var(--text-muted); text-align:center;">Архив склада пуст</td></tr>`}
-            </tbody>
-           </table>
+           <div class="table-container">
+             <table>
+              <thead>
+                <tr>
+                  <th>Инициатор</th>
+                  <th>Наименование</th>
+                  <th>Кол-во</th>
+                  <th>Прежний статус</th>
+                  <th style="text-align:right;">Действия</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${archivedReqs.map(r => `
+                   <tr>
+                     <td style="font-weight:600; color:var(--primary);">${escapeHtml(r.empName)}</td>
+                     <td>${escapeHtml(r.itemName)}</td>
+                     <td style="color:var(--text-muted);">${r.qty} шт.</td>
+                     <td><span class="badge badge-info">${r.prevStatus || 'Отработана'}</span></td>
+                     <td style="text-align:right;">
+                       <button class="btn btn-secondary" style="padding:8px; color:var(--danger);" onclick="deleteRequest(${r.id})"><i data-lucide="trash-2" style="width:14px;height:14px;"></i></button>
+                     </td>
+                   </tr>
+                `).join('') || `<tr><td colspan="5" style="padding:48px; text-align:center; color:var(--text-dim);">Архив пуст</td></tr>`}
+              </tbody>
+             </table>
+           </div>
         </div>
       `;
     }
@@ -807,13 +1034,13 @@ function renderCurrentViewContent() {
         <div class="glass-panel" style="padding:24px;">
            <div style="display:flex; justify-content:space-between; margin-bottom: 24px;">
              <div>
-               <h3>Архив выполненных задач</h3>
-               <p style="color:var(--text-muted); font-size:13px; margin-top:8px;">База данных всех исторических поручений сотрудников.</p>
+               <h3 style="margin:0;">Архив выполненных задач</h3>
+               <p style="color:var(--text-muted); font-size:13px; margin-top:8px;">Полная история поручений и завершенных работ.</p>
              </div>
-             <button class="btn btn-secondary" onclick="exportExcel('tasks')"><i data-lucide="download" style="width:16px; height:16px; vertical-align:middle;"></i> Скачать отчет в Excel</button>
+             <button class="btn btn-secondary" onclick="exportExcel('tasks')"><i data-lucide="download"></i> Excel Отчет</button>
            </div>
            
-           <table style="width:100%; border-collapse: collapse; text-align:left;">
+           <div class="table-container">
             <thead>
               <tr style="border-bottom: 1px solid var(--border);">
                 <th style="padding: 12px; color:var(--text-muted);">Исполнитель</th>
@@ -825,11 +1052,11 @@ function renderCurrentViewContent() {
             </thead>
             <tbody>
               ${archivedPlans.map(p => {
-                 const empName = (APP_DATA.users.find(u => u.id == p.empId) || {}).name || 'Неизвестный';
+                 const empName = escapeHtml((APP_DATA.users.find(u => u.id == p.empId) || {}).name || 'Неизвестный');
                  return `
                  <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
                    <td style="padding: 12px; font-weight:600; color:var(--primary);">${empName}</td>
-                   <td style="padding: 12px;">${p.title}</td>
+                   <td style="padding: 12px;">${escapeHtml(p.title)}</td>
                    <td style="padding: 12px; color:var(--text-muted);">${p.date || '-'}</td>
                    <td style="padding: 12px;">${p.urgency === 'urgent' ? '<b style="color:var(--danger);">СРОЧНО</b>' : 'Плановая'}</td>
                    <td style="padding: 12px; text-align:right;">
@@ -840,7 +1067,8 @@ function renderCurrentViewContent() {
                  `;
               }).join('') || `<tr><td colspan="5" style="padding:24px; color:var(--text-muted); text-align:center;">Архив пуст</td></tr>`}
             </tbody>
-           </table>
+             </table>
+           </div>
         </div>
       `;
     }
@@ -852,24 +1080,21 @@ function renderCurrentViewContent() {
       const totalExpenses = (APP_DATA.expenses || []).reduce((sum, e) => sum + (e.sum || 0), 0);
       const netProfit = totalRevenue - totalExpenses;
       
-      const revPaid = APP_DATA.orders.filter(o => o.stage === 'Оплачен').reduce((a, b) => a + b.sum, 0);
-      const pending = APP_DATA.orders.filter(o => o.stage !== 'Оплачен').reduce((a, b) => a + b.sum, 0);
-      
       const stages = ['Новый', 'В работе', 'Сдан', 'Оплачен'];
       const funnelCounts = stages.map(s => APP_DATA.orders.filter(o => o.stage === s).length);
       const maxFunnel = Math.max(...funnelCounts, 1);
       const funnelHtml = stages.map((s, i) => {
         const count = funnelCounts[i];
         const pct = (count / maxFunnel) * 100;
-        const colors = ['var(--text-muted)', 'var(--primary)', '#9b59b6', 'var(--success)'];
+        const colorMap = ['var(--text-dim)', 'var(--primary)', 'var(--secondary)', 'var(--success)'];
         return `
-          <div style="margin-bottom:16px;">
-            <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:6px; font-weight:600;">
-              <span>${s}</span>
-              <span>${count} заказов</span>
+          <div style="margin-bottom:20px;">
+            <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:8px; font-weight:700;">
+              <span style="color:var(--text-main);">${s}</span>
+              <span style="color:var(--text-muted);">${count} ед.</span>
             </div>
-            <div style="width:100%; background:rgba(255,255,255,0.05); height:12px; border-radius:6px; overflow:hidden;">
-               <div style="width:${pct}%; background:${colors[i]}; height:100%; border-radius:6px; transition: width 1s ease-out;"></div>
+            <div style="width:100%; background:var(--bg-main); height:8px; border-radius:10px; overflow:hidden; border:1px solid var(--border);">
+               <div style="width:${pct}%; background:${colorMap[i]}; height:100%; border-radius:10px; transition: width 1s ease;"></div>
             </div>
           </div>
         `;
@@ -878,82 +1103,104 @@ function renderCurrentViewContent() {
       const allFinishedPlans = APP_DATA.plans.filter(p => p.status === 'done' || p.status === 'archived');
       const empStats = {};
       allFinishedPlans.forEach(p => { empStats[p.empId] = (empStats[p.empId] || 0) + 1; });
-      const sortedEmps = Object.entries(empStats).sort((a,b) => b[1] - a[1]).slice(0, 5);
+      const sortedEmps = Object.entries(empStats).sort((a,b) => b[1] - a[1]).slice(0, 4);
       const maxTask = sortedEmps.length ? sortedEmps[0][1] : 1;
       let empStatsHtml = sortedEmps.map(([id, count]) => {
          const empName = (APP_DATA.users.find(u => u.id == id) || {}).name || 'Неизвестный';
          const pct = (count / maxTask) * 100;
          return `
-          <div style="margin-bottom:16px;">
-            <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:6px; font-weight:600; color:var(--text-main);">
-              <span>👷 ${empName}</span>
-              <span>${count} задач</span>
+          <div style="padding:16px; background:var(--bg-main); border:1px solid var(--border); border-radius:12px;">
+            <div style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:10px; font-weight:700;">
+              <span>${empName}</span>
+              <span style="color:var(--primary);">${count} задач</span>
             </div>
-            <div style="width:100%; background:rgba(255,255,255,0.05); height:12px; border-radius:6px; overflow:hidden;">
-               <div style="width:${pct}%; background:var(--accent); height:100%; border-radius:6px; transition: width 1s ease-out;"></div>
+            <div style="width:100%; background:rgba(255,255,255,0.03); height:6px; border-radius:10px; overflow:hidden;">
+               <div style="width:${pct}%; background:var(--primary); height:100%; border-radius:10px;"></div>
             </div>
           </div>
          `;
       }).join('');
-      if(!empStatsHtml) empStatsHtml = '<div style="color:var(--text-muted); font-size:13px; padding:20px 0;">Пока нет завершенных задач.</div>';
 
       return `
-        <div class="glass-panel" style="padding:24px;">
-           <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 24px;">
+        <div class="glass-panel" style="padding:32px;">
+           <div class="flex-header" style="margin-bottom: 32px;">
              <div>
-               <h3>Финансовая аналитика (Бюджет компании)</h3>
-               <p style="color:var(--text-muted); font-size:13px;">Учет активов строительной базы и движения средств по заказам (Валюта: сом).</p>
+               <h3 style="margin:0;">Финансовая аналитика</h3>
+               <p style="color:var(--text-muted); font-size:13px; margin-top:8px;">Расчет прибыли, активов и продуктивности персонала.</p>
              </div>
-             <div style="display:flex; gap:8px;">
-               <button class="btn" onclick="generateAIReport()" style="background:linear-gradient(135deg, #6e45e2 0%, #88d3ce 100%); border:none;"><i data-lucide="sparkles" style="width:16px; height:16px; vertical-align:middle; margin-right:6px;"></i> AI Анализ бизнеса</button>
-               <button class="btn" onclick="addExpense()" style="background:var(--danger); border:none;"><i data-lucide="minus-circle" style="width:16px; height:16px; vertical-align:middle; margin-right:6px;"></i> Записать Расход</button>
-             </div>
+              <div class="flex-group">
+                <button class="btn btn-secondary" style="background:var(--bg-main); color:var(--text-main); border:1px solid var(--border);" onclick="runDailyReport(true)"><i data-lucide="send"></i> Отправить сводку</button>
+                <button class="btn" style="background:linear-gradient(90deg, #6366f1, #a855f7); color:white;" onclick="generateAIReport()"><i data-lucide="sparkles"></i> AI Анализ</button>
+                <button class="btn" style="background:var(--danger); color:white;" onclick="addExpense()"><i data-lucide="minus-circle"></i> Расход</button>
+              </div>
            </div>
            
-           <div class="grid-cards" style="grid-template-columns: repeat(3, 1fr);">
-             <div class="glass-panel card" style="border-top-color: var(--primary);">
-               <div class="card-title">📦 Активы склада</div>
-               <div style="font-size:24px; font-weight:800; color:var(--text-main);">${invValue.toLocaleString()} <span style="font-size:14px; color:var(--text-muted);">сом</span></div>
+           <div class="grid-cards" style="margin-bottom:32px;">
+             <div class="stat-card" style="border: 1px solid var(--border);">
+               <div class="stat-label">Активы на складе</div>
+               <div class="stat-value" style="font-size:32px; color:var(--primary); font-weight:900;">${invValue.toLocaleString()} <span style="font-size:14px; font-weight:600;">сом</span></div>
              </div>
-             <div class="glass-panel card" style="border-top-color: var(--success);">
-               <div class="card-title">💰 Чистая Прибыль</div>
-               <div style="font-size:24px; font-weight:800; color:var(--success);">${netProfit.toLocaleString()} <span style="font-size:14px; color:var(--text-muted);">сом</span></div>
+             <div class="stat-card" style="border: 1px solid var(--border);">
+               <div class="stat-label">Чистая прибыль</div>
+               <div class="stat-value" style="font-size:32px; color:var(--success); font-weight:900;">${netProfit.toLocaleString()} <span style="font-size:14px; font-weight:600;">сом</span></div>
              </div>
-             <div class="glass-panel card" style="border-top-color: var(--danger);">
-               <div class="card-title">📉 Общие Расходы</div>
-               <div style="font-size:24px; font-weight:800; color:var(--danger);">${totalExpenses.toLocaleString()} <span style="font-size:14px; color:var(--text-muted);">сом</span></div>
+             <div class="stat-card" style="border: 1px solid var(--border);">
+               <div class="stat-label">Операционные расходы</div>
+               <div class="stat-value" style="font-size:32px; color:var(--danger); font-weight:900;">${totalExpenses.toLocaleString()} <span style="font-size:14px; font-weight:600;">сом</span></div>
              </div>
            </div>
 
-           <div style="display:grid; grid-template-columns: 1fr 2fr; gap:24px; margin-top:24px;">
-              <div class="glass-panel" style="padding:20px; border: 1px solid rgba(255,255,255,0.05);">
-                <h4 style="margin-bottom:15px; color:var(--primary);">🧾 Касса (Последние 10)</h4>
-                <div style="max-height:250px; overflow-y:auto;">
+           <div class="grid-2-cols margin-bottom-32" style="grid-template-columns: 2fr 1fr; gap:24px;">
+               <div class="glass-panel" style="padding:24px; background:var(--bg-main); min-height:400px; display:flex; flex-direction:column;">
+                 <h4 style="margin-bottom:24px; color:var(--text-main); display:flex; align-items:center; gap:8px;"><i data-lucide="line-chart"></i> Динамика финансов (План/Факт)</h4>
+                 <div style="flex:1; position:relative;"><canvas id="financeLineChart"></canvas></div>
+               </div>
+               
+               <div class="glass-panel" style="padding:24px; background:var(--bg-main); min-height:400px; display:flex; flex-direction:column;">
+                 <h4 style="margin-bottom:24px; color:var(--text-main); display:flex; align-items:center; gap:8px;"><i data-lucide="pie-chart"></i> Воронка заказов</h4>
+                 <div style="flex:1; position:relative;"><canvas id="funnelPieChart"></canvas></div>
+               </div>
+            </div>
+
+            <div class="grid-2-cols margin-bottom-32">
+               <div class="glass-panel" style="padding:24px; background:var(--bg-main);">
+                 <h4 style="margin-bottom:24px; color:var(--text-main); display:flex; align-items:center; gap:8px;"><i data-lucide="users"></i> Продуктивность (Задачи)</h4>
+                 <div class="flex-col-gap-16">
+                   ${empStatsHtml || '<p style="color:var(--text-dim); text-align:center;">Данных пока нет</p>'}
+                 </div>
+               </div>
+               <div class="glass-panel" style="padding:24px; background:var(--bg-main);">
+                 <h4 style="margin-bottom:24px; color:var(--text-main); display:flex; align-items:center; gap:8px;"><i data-lucide="activity"></i> Статус активности</h4>
+                 <div style="padding:40px 20px; text-align:center; color:var(--text-dim);">
+                    <div style="font-size:64px; font-weight:900; color:var(--primary); line-height:1;">${APP_DATA.orders.filter(o => o.stage!=='Оплачен').length}</div>
+                    <div style="font-size:12px; text-transform:uppercase; letter-spacing:1px; margin-top:8px;">Активных объектов в работе</div>
+                 </div>
+               </div>
+            </div>
+
+           <div class="table-container" style="margin-top:32px;">
+              <div style="padding:20px; border-bottom:1px solid var(--border); font-weight:700;">Последние транзакции (Касса)</div>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Дата</th>
+                    <th>Категория</th>
+                    <th>Комментарий</th>
+                    <th style="text-align:right;">Сумма</th>
+                  </tr>
+                </thead>
+                <tbody>
                   ${(APP_DATA.expenses || []).slice(0, 10).map(e => `
-                    <div style="font-size:12px; padding:10px 0; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center;">
-                      <div>
-                        <div style="font-weight:600;">${e.category}</div>
-                        <div style="font-size:10px; color:var(--text-muted)">${e.date}</div>
-                      </div>
-                      <span style="color:var(--danger); font-weight:700;">-${e.sum.toLocaleString()} сом</span>
-                    </div>
-                  `).join('') || '<div style="color:var(--text-muted); padding:10px 0;">Нет записей</div>'}
-                </div>
-              </div>
-              
-              <div class="glass-panel" style="padding:20px; border: 1px solid rgba(255,255,255,0.05);">
-                <h4 style="margin-bottom:20px; display:flex; align-items:center; gap:8px;"><i data-lucide="bar-chart-2" style="width:18px; height:18px; color:var(--primary);"></i> Воронка обработки Лидов</h4>
-                ${funnelHtml}
-              </div>
+                    <tr>
+                      <td style="color:var(--text-muted); font-size:12px;">${e.date}</td>
+                      <td><span class="badge badge-danger">${e.category}</span></td>
+                      <td style="font-size:13px;">${e.comment}</td>
+                      <td style="text-align:right; font-weight:800; color:var(--danger);">-${e.sum.toLocaleString()} сом</td>
+                    </tr>
+                  `).join('') || '<tr><td colspan="4" style="text-align:center; padding:32px; color:var(--text-dim);">Транзакций не найдено</td></tr>'}
+                </tbody>
+              </table>
            </div>
-
-           <div class="glass-panel" style="padding:24px; margin-top: 24px; border: 1px solid rgba(255,255,255,0.05);">
-             <h4 style="margin-bottom:20px; display:flex; align-items:center; gap:8px;"><i data-lucide="award" style="width:18px; height:18px; color:var(--accent);"></i> Высокая продуктивность сотрудников (Закрытые задачи)</h4>
-             <div style="display:grid; grid-template-columns: 1fr 1fr; gap:40px;">
-                ${empStatsHtml}
-             </div>
-           </div>
-
         </div>
       `;
     }
@@ -961,89 +1208,240 @@ function renderCurrentViewContent() {
     // ----------- ADMIN: SETTINGS -----------
     case 'admin_settings':
       return `
-        <div class="glass-panel" style="padding:24px; margin-bottom: 24px; border: 1px solid #3498db;">
-           <div style="display:flex; justify-content:space-between; align-items:flex-end;">
-             <div class="input-block" style="flex:1; margin-bottom:0; margin-right: 16px;">
-               <label style="color:#3498db;"><i data-lucide="send" style="width:12px;height:12px;"></i> Chat ID группы Telegram (Куда бот будет писать)</label>
-               <input id="sysTgChatId" value="${APP_DATA.settings?.tgChatId || ''}" placeholder="Например: -1001234567890">
+        <div class="glass-panel" style="padding:32px;">
+           <div class="flex-header" style="margin-bottom: 32px;">
+             <div>
+               <h3 style="margin:0;">Управление доступом</h3>
+               <p style="color:var(--text-muted); font-size:13px; margin-top:8px;">Настройка уведомлений и учетных записей.</p>
              </div>
-             <button class="btn btn-secondary" onclick="saveTgSettings()">Сохранить ID</button>
+             <button class="btn" onclick="addUser()"><i data-lucide="user-plus"></i> Новый пользователь</button>
            </div>
-           <p style="font-size:12px; color:var(--text-muted); margin-top:8px;">Инструкция: Добавьте вашего бота в рабочую группу. Напишите любое сообщение в группу, затем узнайте её ID через @getmyid_bot (обычно с минусом).</p>
-        </div>
 
-        <div class="glass-panel" style="padding:24px;">
-           <div style="display:flex; justify-content:space-between; margin-bottom: 24px;">
-             <h3>Сотрудники и клиенты</h3>
-             <button class="btn" onclick="addUser()"><i data-lucide="user-plus" style="width:16px; height:16px; vertical-align:middle;"></i> Регистрация пользователя</button>
+           <div class="grid-2-cols" style="margin-bottom:32px;">
+             <!-- Telegram Settings -->
+             <div class="glass-panel" style="padding:24px; background:var(--bg-main); border-color:var(--secondary);">
+                <h4 style="margin-bottom:20px; color:var(--text-main); display:flex; align-items:center; gap:8px;"><i data-lucide="send"></i> Уведомления</h4>
+                <div style="display:flex; flex-direction:column; gap:16px;">
+                  <div class="input-block" style="margin-bottom:0;">
+                    <label>Telegram Chat ID</label>
+                    <input id="sysTgChatId" value="${APP_DATA.settings?.tgChatId || ''}" placeholder="-100xxxxxxxxx">
+                  </div>
+                  <button class="btn" style="background:var(--secondary); color:white; width:100%;" onclick="saveTgSettings()">Обновить канал</button>
+                </div>
+                <p style="font-size:11px; color:var(--text-dim); margin-top:12px;">ID должен начинаться с минуса (например -100123456789). Проверить ID можно через @getmyid_bot.</p>
+             </div>
+
+             <!-- Worker Categories -->
+             <div class="glass-panel" style="padding:24px; background:var(--bg-main); border-color:var(--primary);">
+                 <div class="flex-header margin-bottom-20">
+                  <h4 style="margin:0; color:var(--text-main); display:flex; align-items:center; gap:8px;"><i data-lucide="briefcase"></i> Группы работников</h4>
+                  <button class="btn" style="padding:6px 12px; font-size:12px;" onclick="addWorkerCategory()"><i data-lucide="plus" style="width:14px;height:14px;"></i> Добавить</button>
+                </div>
+                <div style="display:flex; flex-wrap:wrap; gap:8px;">
+                  ${(APP_DATA.settings?.workerCategories || []).map(cat => `
+                    <div class="badge badge-warning" style="display:flex; align-items:center; gap:8px; padding:6px 12px;">
+                      ${cat}
+                      <i data-lucide="x" style="width:12px; height:12px; cursor:pointer;" onclick="deleteWorkerCategory('${cat}')"></i>
+                    </div>
+                  `).join('') || '<p style="color:var(--text-dim); font-size:12px;">Категории не заданы</p>'}
+                </div>
+             </div>
            </div>
            
-           <table style="width:100%; border-collapse: collapse; text-align:left;">
-            <thead>
-              <tr style="border-bottom: 1px solid var(--border);">
-                <th style="padding: 12px; color:var(--text-muted);">Имя (Должность)</th>
-                <th style="padding: 12px; color:var(--text-muted);">Логин</th>
-                <th style="padding: 12px; color:var(--text-muted);">Пароль</th>
-                <th style="padding: 12px; color:var(--text-muted);">Роль</th>
-                <th style="padding: 12px; color:var(--text-muted); text-align:right;">Действия</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${APP_DATA.users.map(u => `
-                <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
-                  <td style="padding: 12px; font-weight:500;">${u.name}</td>
-                  <td style="padding: 12px; color:var(--primary); font-weight:700;">${u.login}</td>
-                  <td style="padding: 12px; color:var(--text-muted);">***</td>
-                  <td style="padding: 12px;"><span style="background:rgba(255,255,255,0.1); padding:4px 8px; border-radius:4px; font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">${u.role}</span></td>
-                  <td style="padding: 12px; text-align:right;">
-                    <button class="btn btn-secondary" style="padding:6px;" title="Изменить" onclick="editUser(${u.id})"><i data-lucide="edit-3" style="width:14px; height:14px;"></i></button>
-                    ${u.role !== 'admin' ? `<button class="btn btn-secondary" style="padding:6px; color:var(--danger); margin-left:4px;" title="Удалить" onclick="deleteUser(${u.id})"><i data-lucide="trash-2" style="width:14px; height:14px;"></i></button>` : ''}
-                  </td>
+           <div class="table-container">
+             <table>
+              <thead>
+                <tr>
+                  <th>Пользователь</th>
+                  <th>Логин / Группа</th>
+                  <th>Роль</th>
+                  <th style="text-align:right;">Действия</th>
                 </tr>
-              `).join('')}
-            </tbody>
-           </table>
+              </thead>
+              <tbody>
+                ${APP_DATA.users.map(u => `
+                  <tr>
+                    <td>
+                       <div style="font-weight:700;">${u.name}</div>
+                       <div style="font-size:11px; color:var(--text-muted);">${u.tg || 'TG не привязан'}</div>
+                    </td>
+                    <td>
+                       <div style="font-family:monospace; color:var(--primary); font-weight:700;">${u.login}</div>
+                       <div style="font-size:11px; color:var(--text-dim); font-weight:600;">📁 ${u.category || 'Без категории'}</div>
+                    </td>
+                    <td><span class="badge ${u.role==='admin' ? 'badge-danger' : (u.role==='client' ? 'badge-info' : 'badge-warning')}">${u.role}</span></td>
+                    <td style="text-align:right;">
+                      <button class="btn btn-secondary" style="padding:8px;" onclick="editUser(${u.id})"><i data-lucide="edit-3" style="width:14px; height:14px;"></i></button>
+                      ${u.role !== 'admin' ? `<button class="btn btn-secondary" style="padding:8px; color:var(--danger);" onclick="deleteUser(${u.id})"><i data-lucide="trash-2" style="width:14px; height:14px;"></i></button>` : ''}
+                    </td>
+                  </tr>
+                `).join('')}
+              </tbody>
+             </table>
+           </div>
         </div>
       `;
 
     // ----------- ADMIN: LOGS -----------
     case 'admin_logs':
       return `
-        <div class="glass-panel" style="padding:24px;">
-           <div style="display:flex; justify-content:space-between; margin-bottom: 24px;">
+        <div class="glass-panel" style="padding:32px;">
+           <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 32px;">
              <div>
-                <h3>Системный журнал безопасности</h3>
-                <p style="color:var(--text-muted); font-size:13px; margin-top:8px;">Автоматическая фиксация всех действий персонала и клиентов.</p>
+                <h3 style="margin:0;">Журнал событий</h3>
+                <p style="color:var(--text-muted); font-size:13px; margin-top:8px;">Полный аудит действий всех пользователей в системе.</p>
              </div>
-             <button class="btn btn-secondary" onclick="exportExcel('logs')"><i data-lucide="download" style="width:16px; height:16px; vertical-align:middle;"></i> Скачать отчет в Excel</button>
+             <button class="btn btn-secondary" onclick="exportExcel('logs')"><i data-lucide="download"></i> Excel Выгрузка</button>
            </div>
            
-           <div style="background: rgba(0,0,0,0.3); border: 1px solid #333; border-radius: var(--radius); padding: 16px; max-height: 60vh; overflow-y: auto;">
-             <table style="width:100%; border-collapse: collapse; text-align:left;">
+           <div class="table-container">
+             <table>
               <thead>
-                <tr style="border-bottom: 2px solid #444;">
-                  <th style="padding: 12px; color:var(--text-muted); width: 200px;">Время</th>
-                  <th style="padding: 12px; color:var(--text-muted); width: 250px;">Пользователь</th>
-                  <th style="padding: 12px; color:var(--text-muted);">Событие / Действие</th>
+                <tr>
+                  <th style="width:180px;">Время</th>
+                  <th style="width:200px;">Кто</th>
+                  <th>Действие</th>
                 </tr>
               </thead>
               <tbody>
                 ${APP_DATA.auditLog.map(log => `
-                  <tr style="border-bottom: 1px solid rgba(255,255,255,0.02);">
-                    <td style="padding: 12px; font-size:13px; color:var(--text-muted);">${log.time}</td>
-                    <td style="padding: 12px; font-size:13px; color:var(--primary); font-weight:600;">${log.user}</td>
-                    <td style="padding: 12px; font-size:14px;">${log.action}</td>
+                  <tr>
+                    <td style="color:var(--text-dim); font-size:12px; font-family:monospace;">${log.time}</td>
+                    <td><span class="badge badge-info">${log.user}</span></td>
+                    <td style="font-weight:500;">${log.action}</td>
                   </tr>
-                `).join('') || `<tr><td colspan="3" style="padding:24px; color:var(--text-muted); text-align:center;">Журнал пуст. Действий не зафиксировано.</td></tr>`}
+                `).join('') || `<tr><td colspan="3" style="padding:48px; text-align:center; color:var(--text-dim);">Журнал пуст</td></tr>`}
               </tbody>
              </table>
            </div>
         </div>
       `;
+
+    // ----------- CHAT / COMMUNICATIONS -----------
+    case 'employee_chat': {
+      const messages = APP_DATA.chatMessages || [];
+      const emps = APP_DATA.users.filter(u => u.role !== 'client');
       
+      const formatMsgText = (text) => {
+        return text.replace(/@\w+/g, (match) => `<span class="mention">${match}</span>`);
+      };
+
+      return `
+        <div style="display:flex; flex-direction:column; gap:24px; height: calc(100vh - 120px);">
+           <div style="display:flex; justify-content:space-between; align-items:center;">
+             <div>
+               <h3 style="margin:0;">Общий чат сотрудников</h3>
+               <p style="color:var(--text-muted); font-size:13px; margin-top:4px;">Используйте @имя для упоминания коллеги.</p>
+             </div>
+             <div style="display:flex; gap:8px;">
+               ${emps.slice(0, 5).map(e => `
+                 <button class="btn btn-secondary" style="font-size:10px; padding:4px 8px;" onclick="document.getElementById('chatInput').value += '@${e.login} '; document.getElementById('chatInput').focus();">
+                   @${e.login}
+                 </button>
+               `).join('')}
+             </div>
+           </div>
+
+           <div class="chat-container">
+             <div class="chat-messages" id="chatMessages">
+               ${messages.map(m => {
+                 const isMine = m.senderId === STATE.user.id;
+                 return `
+                   <div class="chat-bubble ${isMine ? 'mine' : ''}">
+                     <div class="chat-meta">
+                       <span>${escapeHtml(m.senderName)} (${m.role})</span>
+                       <span class="chat-time">${m.time}</span>
+                     </div>
+                     <div class="chat-text">${formatMsgText(escapeHtml(m.text))}</div>
+                   </div>
+                 `;
+               }).join('') || '<div style="margin:auto; color:var(--text-dim); text-align:center;">Сообщений пока нет. Будьте первыми!</div>'}
+             </div>
+             
+             <div class="chat-input-area">
+               <input id="chatInput" placeholder="Ваше сообщение или предложение..." style="flex:1; background:var(--bg-main); border:1px solid var(--border); color:var(--text-main); padding:12px 20px; border-radius:12px;" onkeydown="if(event.key==='Enter') sendChatMessage()">
+               <button class="btn" onclick="sendChatMessage()" style="width:50px; height:50px; padding:0; justify-content:center;">
+                 <i data-lucide="send"></i>
+               </button>
+             </div>
+           </div>
+        </div>
+        <script>
+           // Scroll to bottom after render
+           setTimeout(() => {
+             const chat = document.getElementById('chatMessages');
+             if(chat) chat.scrollTop = chat.scrollHeight;
+           }, 100);
+        </script>
+      `;
+    }
+
     default: return '';
   }
 }
+
+// ---------------- CHARTS LOGIC ---------------- //
+window.initFinanceCharts = function() {
+  const lineCtx = document.getElementById('financeLineChart')?.getContext('2d');
+  const funnelCtx = document.getElementById('funnelPieChart')?.getContext('2d');
+  
+  if (!lineCtx || !funnelCtx || !window.Chart) return;
+
+  const textColor = getComputedStyle(document.body).getPropertyValue('--text-main').trim() || '#f0f6fc';
+  const gridColor = getComputedStyle(document.body).getPropertyValue('--border').trim() || '#30363d';
+
+  // Dynamic grouping logic by month could go here. For now, visual representation:
+  const labels = ['Янв', 'Фев', 'Мар', 'Апр', 'Май', 'Июн']; 
+  const incomeData = [120000, 450000, 890000, 560000, 1200000, 950000]; 
+  const expenseData = [80000, 230000, 410000, 320000, 450000, 390000]; 
+
+  // Line Chart
+  new Chart(lineCtx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Оборот (Доходы)', data: incomeData, borderColor: '#10b981', backgroundColor: 'rgba(16, 185, 129, 0.1)', fill: true, tension: 0.4 },
+        { label: 'Расходы', data: expenseData, borderColor: '#ef4444', backgroundColor: 'rgba(239, 68, 68, 0.1)', fill: true, tension: 0.4 }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { labels: { color: textColor, font: {family: "'Outfit', sans-serif"} } } },
+      scales: {
+        y: { ticks: { color: textColor }, grid: { color: gridColor } },
+        x: { ticks: { color: textColor }, grid: { display: false } }
+      }
+    }
+  });
+
+  // Funnel Pie Chart
+  const stages = ['Новый', 'В работе', 'Сдан', 'Оплачен'];
+  const funnelCounts = stages.map(s => APP_DATA.orders.filter(o => o.stage === s).length);
+
+  new Chart(funnelCtx, {
+    type: 'doughnut',
+    data: {
+      labels: stages,
+      datasets: [{
+        data: funnelCounts,
+        backgroundColor: ['#484f58', '#f59e0b', '#6366f1', '#10b981'],
+        borderWidth: 0,
+        hoverOffset: 4
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { 
+        legend: { position: 'bottom', labels: { color: textColor, padding: 20, font: {family: "'Outfit', sans-serif"} } }
+      },
+      cutout: '75%'
+    }
+  });
+};
+
 
 // ---------------- GLOBAL MODIFICATION API ---------------- //
 
@@ -1183,18 +1581,26 @@ window.prevOrderStage = function(id) {
 };
 
 window.addOrder = function() {
+  const catOptions = (APP_DATA.settings?.workerCategories || []).map(c => `<option value="${c}">${c}</option>`).join('');
   const formHtml = `
     <div class="input-block">
-      <label>Клиент (Название или ФИО)</label>
-      <input id="modClient" required>
+      <label><i data-lucide="user"></i> Клиент (Название или ФИО)</label>
+      <input id="modClient" placeholder="ООО Весна / Александр" required>
     </div>
     <div class="input-block">
-      <label>Сумма заказа (сом)</label>
-      <input id="modSum" type="number" required>
+      <label><i data-lucide="banknote"></i> Сумма заказа (сом)</label>
+      <input id="modSum" type="number" placeholder="50000" required>
     </div>
     <div class="input-block">
-      <label>Дедлайн / Дата сдачи</label>
+      <label><i data-lucide="calendar"></i> Дедлайн / Дата сдачи</label>
       <input id="modDate" type="date" required>
+    </div>
+    <div class="input-block">
+      <label><i data-lucide="folder"></i> Ответственная группа работников</label>
+      <select id="modOrderCat">
+        <option value="">Без категории</option>
+        ${catOptions}
+      </select>
     </div>
   `;
   window.openModal('Новый Лид / Заказ', formHtml, () => {
@@ -1204,10 +1610,13 @@ window.addOrder = function() {
       client: document.getElementById('modClient').value,
       sum: parseInt(document.getElementById('modSum').value) || 0,
       date: document.getElementById('modDate').value,
+      workerCategory: document.getElementById('modOrderCat').value,
       stage: 'Новый'
     });
     addLog(`CRM: Создан новый лид/заказ ${pId}`);
+    saveDB();
     window.closeModal();
+    render();
   });
 };
 
@@ -1308,11 +1717,11 @@ window.printInvoice = function(id) {
 window.createRequest = function() {
   const formHtml = `
     <div class="input-block">
-      <label>Наименование материала</label>
-      <input id="reqItem" required>
+      <label><i data-lucide="box"></i> Наименование материала</label>
+      <input id="reqItem" placeholder="Песок сеяный / Арматура 12мм" required>
     </div>
     <div class="input-block">
-      <label>Требуемое количество</label>
+      <label><i data-lucide="hash"></i> Требуемое количество</label>
       <input id="reqQty" type="number" value="1" min="1" required>
     </div>
   `;
@@ -1395,20 +1804,20 @@ window.openTaskComments = function(id) {
   if(!p.comments) p.comments = [];
   
   const getCommentsHtml = () => `
-    <div id="commentsWrapper" style="max-height:40vh; overflow-y:auto; margin-bottom:16px; padding-right:8px; display:flex; flex-direction:column; gap:12px;">
+    <div id="commentsWrapper" style="max-height:45vh; overflow-y:auto; margin-bottom:20px; padding-right:10px; display:flex; flex-direction:column; gap:16px;">
       ${p.comments.map(c => `
-      <div style="padding:12px; border-radius:8px; background: rgba(255,255,255,0.05); border: 1px solid var(--border);">
-        <div style="display:flex; justify-content:space-between; margin-bottom:8px;">
-          <strong style="color:var(--primary); font-size:13px;">${c.author}</strong>
-          <span style="font-size:11px; color:var(--text-muted);">${c.time}</span>
+      <div class="glass-panel" style="padding:16px; background:var(--bg-main); border:1px solid var(--border);">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+          <strong style="color:var(--primary); font-size:13px; display:flex; align-items:center; gap:6px;"><i data-lucide="user" style="width:12px;height:12px;"></i> ${c.author}</strong>
+          <span style="font-size:11px; color:var(--text-dim); font-weight:600;">${c.time}</span>
         </div>
-        <div style="font-size:14px; color:var(--text-main); line-height:1.4;">${c.text}</div>
+        <div style="font-size:14px; color:var(--text-main); line-height:1.5;">${c.text}</div>
       </div>
-      `).join('') || '<div style="color:var(--text-muted); font-size:13px; text-align:center; padding:20px;">Пока нет комментариев. Напишите первым!</div>'}
+      `).join('') || '<div style="color:var(--text-dim); text-align:center; padding:32px; border:1px dashed var(--border); border-radius:12px;">Комментариев пока нет. Будьте первыми!</div>'}
     </div>
-    <div class="input-block" style="margin-bottom:0; padding-top:16px; border-top: 1px solid var(--border);">
-      <label>Ваш комментарий</label>
-      <textarea id="newCommentText" rows="3" placeholder="Введите текст сообщения..." style="width:100%; background:rgba(255,255,255,0.05); border:1px solid var(--border); color:var(--text-main); border-radius:var(--radius); padding:10px; resize:none;"></textarea>
+    <div class="input-block" style="margin-top:20px; padding-top:20px; border-top: 1px solid var(--border);">
+      <label><i data-lucide="message-square"></i> Написать сообщение</label>
+      <textarea id="newCommentText" rows="3" placeholder="Введите ваш комментарий..." style="width:100%; font-family:inherit;"></textarea>
     </div>
   `;
 
@@ -1448,19 +1857,19 @@ window.addPlan = function() {
   
   const formHtml = `
     <div class="input-block">
-      <label>Строитель / Сотрудник (Исполнитель)</label>
+      <label><i data-lucide="user-check"></i> Исполнитель</label>
       <select id="modEmpId" required>${empOptions}</select>
     </div>
     <div class="input-block">
-      <label>Краткое описание задачи</label>
-      <input id="modTitle" required>
+      <label><i data-lucide="file-text"></i> Суть задачи</label>
+      <input id="modTitle" placeholder="Залить фундамент на объекте X" required>
     </div>
     <div class="input-block">
-      <label>Срок сдачи (Дедлайн)</label>
+      <label><i data-lucide="calendar"></i> Срок сдачи</label>
       <input id="modDate" type="date" required>
     </div>
     <div class="input-block">
-      <label>Приоритет исполнения</label>
+      <label><i data-lucide="alert-triangle"></i> Приоритет</label>
       <select id="modUrgency" required>
         <option value="routine">Обычная (Плановая)</option>
         <option value="urgent">СРОЧНО!</option>
@@ -1486,6 +1895,162 @@ window.addPlan = function() {
   });
 };
 
+window.printInvoice = function(id) {
+  const order = APP_DATA.orders.find(o => String(o.id) === String(id));
+  if (!order) return;
+
+  const invoiceHtml = `
+    <div style="padding: 40px; font-family: 'Inter', sans-serif; color: #000; background: #fff;">
+      <div style="display:flex; justify-content:space-between; margin-bottom:40px; border-bottom: 2px solid #000; padding-bottom: 20px;">
+        <div>
+          <h1 style="margin:0; font-size: 28px; color: #1e1e1e;">СтройКомплект ERP</h1>
+          <p style="margin:4px 0 0; color: #555;">Официальный счет на оплату</p>
+        </div>
+        <div style="text-align:right;">
+          <h2 style="margin:0; font-size: 24px; color: #4f46e5;">СЧЕТ #${order.id}</h2>
+          <p style="margin:4px 0 0; color: #555;">От: ${order.date}</p>
+        </div>
+      </div>
+      
+      <div style="margin-bottom: 40px;">
+        <h3 style="margin:0 0 8px; color: #555; text-transform:uppercase; font-size:12px;">Заказчик:</h3>
+        <p style="margin:0; font-size:18px; font-weight:700;">${escapeHtml(order.client)}</p>
+      </div>
+
+      <table style="width:100%; border-collapse: collapse; margin-bottom: 40px;">
+        <thead>
+          <tr style="background-color: #f1f5f9;">
+            <th style="padding: 12px; text-align:left; border: 1px solid #e2e8f0;">Описание услуг / товаров</th>
+            <th style="padding: 12px; text-align:right; border: 1px solid #e2e8f0;">Сумма</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td style="padding: 12px; border: 1px solid #e2e8f0;">Комплексные работы по договору (${escapeHtml(order.client)})</td>
+            <td style="padding: 12px; text-align:right; border: 1px solid #e2e8f0; font-weight:600;">${order.sum.toLocaleString()} сом</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div style="display:flex; justify-content:space-between; margin-top:40px;">
+        <div style="width:40%;">
+           <div style="border-bottom:1px solid #000; margin-top:40px;"></div>
+           <p style="font-size:12px; color:#555; margin-top:4px;">Подпись руководителя</p>
+        </div>
+        <div style="width: 300px;">
+          <div style="display:flex; justify-content:space-between; padding: 12px 0; border-top: 2px solid #000;">
+            <strong style="font-size:18px;">ИТОГО К ОПЛАТЕ:</strong>
+            <strong style="font-size:18px; color:#10b981;">${order.sum.toLocaleString()} сом</strong>
+          </div>
+        </div>
+      </div>
+      
+      <div style="margin-top: 80px; text-align:center; color:#94a3b8; font-size:12px;">
+        Документ сгенерирован автоматически системой СтройКомплект ERP
+      </div>
+    </div>
+  `;
+
+  const container = document.createElement('div');
+  container.innerHTML = invoiceHtml;
+  
+  if (window.html2pdf) {
+    html2pdf().set({
+      margin: 10,
+      filename: `Invoice_${order.id}.pdf`,
+      image: { type: 'jpeg', quality: 0.98 },
+      html2canvas: { scale: 2 },
+      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
+    }).from(container).save();
+    addLog(`CRM: Сгенерировал PDF счет для ${order.id}`);
+  } else {
+    alert("Библиотека генерации PDF не загружена. Проверьте интернет-соединение.");
+  }
+};
+
+window.showPlanMap = function() {
+  const mapHtml = `
+    <div id="tasksMap" style="width: 100%; height: 60vh; border-radius: 12px; background: #eee; z-index: 10;"></div>
+    <div style="margin-top: 12px; font-size: 13px; color: var(--text-dim);">
+      * Координаты объектов генерируются на основе адреса. Нажмите на геометку для просмотра деталей.
+    </div>
+  `;
+  
+  window.openModal('Карта активности (Объекты)', mapHtml, null);
+  
+  // Wait for modal to render in DOM
+  setTimeout(() => {
+    if (!window.L) {
+      alert("Карты еще загружаются, попробуйте через пару секунд.");
+      return;
+    }
+    
+    // Fallback if modal was closed before timeout
+    const mapEl = document.getElementById('tasksMap');
+    if (!mapEl) return;
+
+    // Initialize map centered at Bishkek
+    const map = L.map('tasksMap').setView([42.8746, 74.5698], 12); 
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '© OpenStreetMap ERP'
+    }).addTo(map);
+    
+    // Setup Icon to avoid missing image paths
+    const iconBase = L.icon({
+      iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
+      iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
+      shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
+      iconSize: [25, 41],
+      iconAnchor: [12, 41],
+      popupAnchor: [1, -34],
+      tooltipAnchor: [16, -28]
+    });
+
+    const isAdmin = STATE.user.role === 'admin';
+    let basePlans = isAdmin ? APP_DATA.plans : APP_DATA.plans.filter(p => p.empId === STATE.user.id);
+    
+    // Only show active tasks on the map
+    basePlans = basePlans.filter(p => p.status !== 'archived');
+    
+    // Add markers for tasks
+    basePlans.forEach((p, idx) => {
+      // Mock coordinates slightly offset around Bishkek center for demonstration
+      // Using predictable offsets based on ID to keep markers stable
+      const offsetLat = Math.sin(p.id * 10) * 0.05;
+      const offsetLng = Math.cos(p.id * 10) * 0.05;
+      const lat = 42.8746 + offsetLat;
+      const lng = 74.5698 + offsetLng;
+      
+      const emp = APP_DATA.users.find(u => u.id == p.empId);
+      const empName = emp ? escapeHtml(emp.name) : 'Неизвестный';
+      
+      const colorMap = {
+        'open': '#f59e0b',
+        'in_progress': '#6366f1',
+        'done': '#10b981'
+      };
+      const textMap = {
+        'open': 'Ожидает выполнения',
+        'in_progress': 'В работе',
+        'done': 'Выполнено'
+      };
+
+      const popupHtml = `
+        <div style="font-family:'Outfit','Inter',sans-serif; min-width: 200px;">
+          <b style="font-size:15px; color:#1e1e1e;">${escapeHtml(p.title)}</b><br>
+          <div style="margin-top:8px; color:#555; font-size:13px;">👷 Исполнитель: <b>${empName}</b></div>
+          <div style="margin-top:4px; color:${colorMap[p.status]}; font-size:13px; font-weight:800;">
+            ${textMap[p.status]}
+          </div>
+          ${p.urgency === 'urgent' ? '<div style="margin-top:4px; color:#dc2626; font-weight:800; font-size:11px; text-transform:uppercase;">Срочный выезд!</div>' : ''}
+        </div>
+      `;
+      L.marker([lat, lng], {icon: iconBase}).addTo(map).bindPopup(popupHtml);
+    });
+    
+  }, 150);
+};
+
 window.editPlan = function(id) {
   const plan = APP_DATA.plans.find(p => String(p.id) === String(id));
   if (!plan) return;
@@ -1494,19 +2059,19 @@ window.editPlan = function(id) {
   
   const formHtml = `
     <div class="input-block">
-      <label>Сотрудник (Исполнитель)</label>
+      <label><i data-lucide="user-check"></i> Исполнитель</label>
       <select id="modEmpId" required>${empOptions}</select>
     </div>
     <div class="input-block">
-      <label>Описание задачи</label>
+      <label><i data-lucide="file-text"></i> Описание задачи</label>
       <input id="modTitle" value="${plan.title}" required>
     </div>
     <div class="input-block">
-      <label>Срок сдачи (Дедлайн)</label>
+      <label><i data-lucide="calendar"></i> Срок сдачи</label>
       <input id="modDate" type="date" value="${plan.date || ''}" required>
     </div>
     <div class="input-block">
-      <label>Уровень срочности</label>
+      <label><i data-lucide="alert-triangle"></i> Уровень срочности</label>
       <select id="modUrgency" required>
         <option value="routine" ${plan.urgency === 'routine' ? 'selected' : ''}>Обычная (Плановая)</option>
         <option value="urgent" ${plan.urgency === 'urgent' ? 'selected' : ''}>СРОЧНО!</option>
@@ -1536,7 +2101,7 @@ window.deleteInventory = function(id) {
 window.addInventory = function() {
   const formHtml = `
     <div class="input-block">
-      <label>Категория</label>
+      <label><i data-lucide="layers"></i> Категория</label>
       <select id="modCat" required>
         <option value="Материалы">Строительные Материалы</option>
         <option value="Оборудование">Оборудование / Станки</option>
@@ -1546,16 +2111,16 @@ window.addInventory = function() {
       </select>
     </div>
     <div class="input-block">
-      <label>Наименование</label>
-      <input id="modName" required>
+      <label><i data-lucide="tag"></i> Наименование</label>
+      <input id="modName" placeholder="Брус 100x100" required>
     </div>
     <div class="input-block">
-      <label>Фактический остаток на складе</label>
-      <input id="modStock" type="number" required>
+      <label><i data-lucide="archive"></i> Остаток на складе</label>
+      <input id="modStock" type="number" placeholder="0" required>
     </div>
     <div class="input-block">
-      <label>Закупочная цена (в сомах)</label>
-      <input id="modPrice" type="number" required>
+      <label><i data-lucide="dollar-sign"></i> Закупочная цена (сом)</label>
+      <input id="modPrice" type="number" placeholder="500" required>
     </div>
   `;
   window.openModal('Поступление на склад', formHtml, () => {
@@ -1581,7 +2146,7 @@ window.editInventory = function(id) {
 
   const formHtml = `
     <div class="input-block">
-      <label>Категория</label>
+      <label><i data-lucide="layers"></i> Категория</label>
       <select id="modCat" required>
         <option value="Материалы" ${item.category === 'Материалы' ? 'selected' : ''}>Строительные Материалы</option>
         <option value="Оборудование" ${item.category === 'Оборудование' ? 'selected' : ''}>Оборудование / Станки</option>
@@ -1591,15 +2156,15 @@ window.editInventory = function(id) {
       </select>
     </div>
     <div class="input-block">
-      <label>Наименование материала</label>
+      <label><i data-lucide="tag"></i> Наименование материала</label>
       <input id="modName" value="${item.name}" required>
     </div>
     <div class="input-block">
-      <label>Остаток</label>
+      <label><i data-lucide="archive"></i> Остаток</label>
       <input id="modStock" type="number" value="${item.stock}" required>
     </div>
     <div class="input-block">
-      <label>Закупочная цена (сом)</label>
+      <label><i data-lucide="dollar-sign"></i> Закупочная цена (сом)</label>
       <input id="modPrice" type="number" value="${item.price}" required>
     </div>
   `;
@@ -1641,30 +2206,32 @@ window.viewInventoryDetails = function(id) {
   `).join('') || '<div style="padding:10px; color:var(--text-muted)">История пуста</div>';
 
   const html = `
-    <div style="display:flex; gap:20px; align-items:flex-start;">
-      <div style="text-align:center;">
-        <img src="${qrUrl}" style="border: 4px solid white; border-radius: 8px; margin-bottom:10px;">
-        <div style="font-size:11px; color:var(--text-muted)">QR-код товара ID:${item.id}</div>
+    <div style="display:flex; gap:24px; align-items:flex-start;">
+      <div class="glass-panel" style="padding:16px; background:white; text-align:center; border:none; shrink:0;">
+        <img src="${qrUrl}" style="width:140px; height:140px; display:block;">
+        <div style="font-size:10px; color:#333; font-weight:800; margin-top:8px;">ID: ${item.id}</div>
       </div>
       <div style="flex:1;">
-        <h4 style="margin-top:0;">${item.name}</h4>
-        <p style="color:var(--primary); font-weight:700;">${item.stock} шт. на складе</p>
-        <div style="margin-top:20px; border-top:1px solid var(--border); padding-top:10px;">
-          <h5 style="margin-bottom:10px;">История перемещений:</h5>
-          <div style="max-height:200px; overflow-y:auto; border:1px solid var(--border); border-radius:4px; background:rgba(0,0,0,0.1)">
+        <div style="font-size:12px; font-weight:700; color:var(--primary); text-transform:uppercase; margin-bottom:4px;">${item.category}</div>
+        <h3 style="margin:0 0 12px 0; font-size:20px;">${item.name}</h3>
+        <span class="badge ${item.stock <= 5 ? 'badge-danger' : 'badge-info'}" style="font-size:14px; padding:6px 14px;">${item.stock} шт. в остатке</span>
+        
+        <div style="margin-top:24px;">
+          <div style="font-size:13px; font-weight:700; color:var(--text-main); margin-bottom:12px; display:flex; align-items:center; gap:8px;"><i data-lucide="history"></i> История перемещений</div>
+          <div style="max-height:220px; overflow-y:auto; border-radius:12px; border:1px solid var(--border); background:rgba(0,0,0,0.1);">
             ${historyHtml}
           </div>
         </div>
       </div>
     </div>
   `;
-  window.openModal('Детальная информация', html, null);
+  window.openModal('Детали позиции', html, null);
 };
 
 window.addExpense = function() {
   const formHtml = `
     <div class="input-block">
-      <label>Категория расхода</label>
+      <label><i data-lucide="layers"></i> Категория расхода</label>
       <select id="expCat">
         <option value="Зарплата">Зарплата / Выплаты</option>
         <option value="Материалы">Закупка стройматериалов</option>
@@ -1674,12 +2241,12 @@ window.addExpense = function() {
       </select>
     </div>
     <div class="input-block">
-      <label>Сумма (сом)</label>
-      <input id="expSum" type="number" required>
+      <label><i data-lucide="banknote"></i> Сумма (сом)</label>
+      <input id="expSum" type="number" placeholder="0" required>
     </div>
     <div class="input-block">
-      <label>Комментарий / Кому</label>
-      <input id="expComment" placeholder="Например: Закупка арматуры у Виктора" required>
+      <label><i data-lucide="message-square"></i> Комментарий</label>
+      <input id="expComment" placeholder="Оплата аренды склада за март" required>
     </div>
   `;
   window.openModal('Зафиксировать расход (Касса)', formHtml, () => {
@@ -1733,30 +2300,69 @@ window.generateAIReport = function() {
   }, 1200);
 };
 
-// USER CRUD
-window.addUser = function() {
+// CATEGORY MANAGEMENT
+window.addWorkerCategory = function() {
   const formHtml = `
     <div class="input-block">
-      <label>Имя и Специализация</label>
-      <input id="modUName" placeholder="Например: Иван (Арматурщик)" required>
+      <label>Название новой группы</label>
+      <input id="newCatName" placeholder="например: Плотники" required>
+    </div>
+  `;
+  window.openModal('Добавить группу работников', formHtml, () => {
+    const name = document.getElementById('newCatName').value;
+    if (name && name.trim()) {
+      if (!APP_DATA.settings.workerCategories) APP_DATA.settings.workerCategories = [];
+      if (APP_DATA.settings.workerCategories.includes(name.trim())) return alert("Такая группа уже есть.");
+      APP_DATA.settings.workerCategories.push(name.trim());
+      addLog(`Настройки: Добавлена новая группа работников "${name.trim()}"`);
+      saveDB();
+      window.closeModal();
+      render();
+    }
+  });
+};
+
+window.deleteWorkerCategory = function(name) {
+  if (confirm(`Удалить группу "${name}"? Пользователи в этой группе останутся, но без привязки.`)) {
+    APP_DATA.settings.workerCategories = APP_DATA.settings.workerCategories.filter(c => c !== name);
+    addLog(`Настройки: Удалена группа работников "${name}"`);
+    saveDB();
+    render();
+  }
+};
+
+// USER CRUD
+window.addUser = function() {
+  const catOptions = (APP_DATA.settings?.workerCategories || []).map(c => `<option value="${c}">${c}</option>`).join('');
+  const formHtml = `
+    <div class="input-block">
+      <label><i data-lucide="user"></i> Имя / Специализация</label>
+      <input id="modUName" placeholder="Артем (Бригадир)" required>
     </div>
     <div class="input-block">
-      <label>Telegram (через @) *теги</label>
-      <input id="modUTG" placeholder="@ivan_worker">
+      <label><i data-lucide="send"></i> Telegram @логин</label>
+      <input id="modUTG" placeholder="@username">
     </div>
     <div class="input-block">
-      <label>Уникальный логин доступа</label>
-      <input id="modULogin" placeholder="ivan123" required>
+      <label><i data-lucide="shield"></i> Логин доступа</label>
+      <input id="modULogin" placeholder="artem_erp" required>
     </div>
     <div class="input-block">
-      <label>Пароль</label>
-      <input id="modUPassword" placeholder="Пароль" required>
+      <label><i data-lucide="key"></i> Пароль</label>
+      <input id="modUPassword" type="password" placeholder="••••••••" required>
     </div>
     <div class="input-block">
-      <label>Группа прав (Роль)</label>
+      <label><i data-lucide="briefcase"></i> Права доступа</label>
       <select id="modURole" required>
         <option value="employee">Сотрудник</option>
-        <option value="client">Клиент заказчик</option>
+        <option value="client">Клиент</option>
+      </select>
+    </div>
+    <div class="input-block" id="catBlock">
+      <label><i data-lucide="folder"></i> Группа работников (для сотрудников)</label>
+      <select id="modUCategory">
+        <option value="">Без категории</option>
+        ${catOptions}
       </select>
     </div>
   `;
@@ -1769,6 +2375,7 @@ window.addUser = function() {
       login: document.getElementById('modULogin').value,
       password: document.getElementById('modUPassword').value,
       role: document.getElementById('modURole').value,
+      category: document.getElementById('modUCategory').value
     });
     addLog(`Безопасность: Зарегистрировал пользователя "${username}"`);
     saveDB();
@@ -1778,27 +2385,35 @@ window.addUser = function() {
 window.editUser = function(id) {
   const user = APP_DATA.users.find(u => u.id === id);
   if(!user) return;
+  const catOptions = (APP_DATA.settings?.workerCategories || []).map(c => `<option value="${c}" ${user.category === c ? 'selected' : ''}>${c}</option>`).join('');
   const formHtml = `
     <div class="input-block">
-      <label>Имя и Специализация</label>
+      <label><i data-lucide="user"></i> Имя / Специализация</label>
       <input id="modUName" value="${user.name}" required>
     </div>
     <div class="input-block">
-      <label>Telegram (через @)</label>
-      <input id="modUTG" value="${user.tg || ''}" placeholder="@ivan_worker">
+      <label><i data-lucide="send"></i> Telegram @логин</label>
+      <input id="modUTG" value="${user.tg || ''}" placeholder="@username">
     </div>
     <div class="input-block">
-      <label>Уникальный логин доступа</label>
+      <label><i data-lucide="shield"></i> Логин доступа</label>
       <input id="modULogin" value="${user.login}" required>
     </div>
     <div class="input-block">
-      <label>Пароль</label>
+      <label><i data-lucide="key"></i> Пароль</label>
       <input id="modUPassword" value="${user.password}" required>
     </div>
     <div class="input-block">
-      <label>Группа прав</label>
+      <label><i data-lucide="briefcase"></i> Права доступа</label>
       <select id="modURole" required disabled>
         <option value="${user.role}">${user.role === 'client' ? 'Клиент' : (user.role === 'admin' ? 'Администратор' : 'Сотрудник')}</option>
+      </select>
+    </div>
+    <div class="input-block">
+      <label><i data-lucide="folder"></i> Группа работников</label>
+      <select id="modUCategory">
+        <option value="">Без категории</option>
+        ${catOptions}
       </select>
     </div>
   `;
@@ -1807,6 +2422,7 @@ window.editUser = function(id) {
     user.tg = document.getElementById('modUTG').value;
     user.login = document.getElementById('modULogin').value;
     user.password = document.getElementById('modUPassword').value;
+    user.category = document.getElementById('modUCategory').value;
     addLog(`Безопасность: Изменил данные пользователя "${user.name}"`);
     saveDB();
     window.closeModal();
@@ -1937,7 +2553,16 @@ function attachDashboardEvents() {
   document.querySelectorAll('.nav-item').forEach(el => {
     el.addEventListener('click', (e) => {
       const view = e.currentTarget.dataset.view;
-      if (view) updateView(view);
+      if (view) {
+        updateView(view);
+        // Auto-close sidebar on mobile after selection
+        if (window.innerWidth <= 768) {
+          const sb = document.getElementById('sidebar');
+          const ov = document.getElementById('sidebarOverlay');
+          if(sb) sb.classList.remove('active');
+          if(ov) ov.classList.remove('active');
+        }
+      }
     });
   });
 
@@ -1959,4 +2584,198 @@ document.addEventListener('submit', (e) => {
   }
 });
 
-document.addEventListener('DOMContentLoaded', loadDB);
+// Initialize app
+document.addEventListener('DOMContentLoaded', () => {
+  loadDB();
+  if (!dailyReportTimer) {
+     dailyReportTimer = setInterval(() => runDailyReport(), 60000);
+  }
+});
+window.sendChatMessage = async function() {
+  const input = document.getElementById('chatInput');
+  const text = input.value.trim();
+  if(!text) return;
+
+  const now = new Date();
+  const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  
+  const newMessage = {
+    id: Date.now(),
+    senderId: STATE.user.id,
+    senderName: STATE.user.name,
+    role: STATE.user.role === 'admin' ? 'Админ' : 'Сотрудник',
+    text: text,
+    time: timeStr
+  };
+
+  if(!APP_DATA.chatMessages) APP_DATA.chatMessages = [];
+  APP_DATA.chatMessages.push(newMessage);
+  // Keep last 100 messages
+  if(APP_DATA.chatMessages.length > 100) APP_DATA.chatMessages.shift();
+
+  input.value = '';
+  
+  // 1. Save to DB
+  saveDB();
+  
+  // 2. Duplicate to Telegram
+  const tgMsg = `💬 <b>Чат: Сообщение от ${STATE.user.name}</b>\n\n${text}\n\n<i>Отправлено из ERP системы</i>`;
+  sendTelegramNotification(tgMsg);
+  
+  // 3. Render
+  render();
+};
+window.saveTgSettings = function() {
+  const chatId = document.getElementById('sysTgChatId').value;
+  const repTime = document.getElementById('sysReportTime').value;
+  if(!APP_DATA.settings) APP_DATA.settings = {};
+  APP_DATA.settings.tgChatId = chatId;
+  APP_DATA.settings.reportTime = repTime;
+  addLog(`Настройки: Обновлены параметры уведомлений (Чат: ${chatId}, Время: ${repTime})`);
+  saveDB();
+  alert("Настройки связи и уведомлений сохранены!");
+};
+
+window.toggleSidebar = function() {
+  const sb = document.getElementById('sidebar');
+  const overlay = document.getElementById('sidebarOverlay');
+  if(sb) sb.classList.toggle('active');
+  if(overlay) overlay.classList.toggle('active');
+};
+
+// ---------------- PREMIUM: PDF GENERATION ---------------- //
+window.printInvoice = function(orderId) {
+  const o = APP_DATA.orders.find(x => x.id === orderId);
+  if(!o) return alert("Заказ не найден");
+
+  const element = document.createElement('div');
+  element.style.padding = '40px';
+  element.style.color = '#333';
+  element.style.fontFamily = 'Arial, sans-serif';
+  element.style.background = '#fff';
+  
+  element.innerHTML = `
+    <div style="display:flex; justify-content:space-between; border-bottom:2px solid #eee; padding-bottom:20px; margin-bottom:40px;">
+      <div>
+        <h1 style="color:#6366f1; margin:0;">СТРОЙДОМ ERP</h1>
+        <p style="color:#666; font-size:12px; margin-top:5px;">Система автоматизации строительного бизнеса</p>
+      </div>
+      <div style="text-align:right;">
+        <h2 style="margin:0;">СЧЕТ-КВИТАНЦИЯ</h2>
+        <p style="color:#666; font-size:14px;">№ ${o.id}</p>
+        <p style="color:#666; font-size:12px;">Дата формирования: ${new Date().toLocaleDateString()}</p>
+      </div>
+    </div>
+
+    <div style="margin-bottom:40px;">
+      <div style="display:grid; grid-template-columns: 1fr 1fr; gap:40px;">
+        <div>
+          <h4 style="margin-bottom:10px; color:#444;">ИСПОЛНИТЕЛЬ:</h4>
+          <p style="font-size:14px; margin:2px 0;">ОсОО "СтройДом"</p>
+          <p style="font-size:13px; color:#666;">Киргизия, г. Бишкек</p>
+          <p style="font-size:13px; color:#666;">Тел: +996 (XXX) XX-XX-XX</p>
+        </div>
+        <div>
+          <h4 style="margin-bottom:10px; color:#444;">ЗАКАЗЧИК:</h4>
+          <p style="font-size:14px; margin:2px 0;">${escapeHtml(o.client)}</p>
+          <p style="font-size:13px; color:#666;">Срок выполнения: ${o.date}</p>
+        </div>
+      </div>
+    </div>
+
+    <table style="width:100%; border-collapse:collapse; margin-bottom:40px;">
+      <thead>
+        <tr style="background:#f8fafc; border-bottom:1px solid #ddd;">
+          <th style="padding:12px; text-align:left;">Наименование работ / услуг</th>
+          <th style="padding:12px; text-align:right;">Кол-во</th>
+          <th style="padding:12px; text-align:right;">Цена</th>
+          <th style="padding:12px; text-align:right;">Итого</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td style="padding:12px; border-bottom:1px solid #eee;">Оказание услуг по договору (Объект ${o.id})</td>
+          <td style="padding:12px; border-bottom:1px solid #eee; text-align:right;">1.00</td>
+          <td style="padding:12px; border-bottom:1px solid #eee; text-align:right;">${o.sum.toLocaleString()} сом</td>
+          <td style="padding:12px; border-bottom:1px solid #eee; text-align:right; font-weight:bold;">${o.sum.toLocaleString()} сом</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div style="display:flex; justify-content:flex-end;">
+      <div style="width:250px;">
+        <div style="display:flex; justify-content:space-between; margin-bottom:10px;">
+          <span>Скидка:</span>
+          <span>0 сом</span>
+        </div>
+        <div style="display:flex; justify-content:space-between; margin-bottom:10px; font-weight:bold; font-size:18px; color:#6366f1; border-top:1px solid #eee; padding-top:10px;">
+          <span>К ОПЛАТЕ:</span>
+          <span>${o.sum.toLocaleString()} сом</span>
+        </div>
+      </div>
+    </div>
+
+    <div style="margin-top:100px; display:flex; justify-content:space-between;">
+      <div style="border-top:1px solid #333; width:200px; padding-top:10px; font-size:12px; color:#666; text-align:center;">
+        М.П. (Подпись Исполнителя)
+      </div>
+      <div style="border-top:1px solid #333; width:200px; padding-top:10px; font-size:12px; color:#666; text-align:center;">
+        Подпись Заказчика
+      </div>
+    </div>
+    
+    <div style="margin-top:60px; text-align:center; color:#999; font-size:10px;">
+      Документ сформирован автоматически в ERP системе СтройДом.<br>
+      Благодарим за сотрудничество!
+    </div>
+  `;
+
+  const opt = {
+    margin: 10,
+    filename: `Invoice_${o.id}_${o.client}.pdf`,
+    image: { type: 'jpeg', quality: 0.98 },
+    html2canvas: { scale: 2, useCORS: true },
+    jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
+  };
+
+  html2pdf().set(opt).from(element).save().then(() => {
+    addLog(`Документы: Сгенерирован и скачан PDF счет для заказа ${o.id}`);
+  });
+};
+
+// ---------------- PREMIUM: MAPS (LEAFLET) ---------------- //
+window.openTaskMap = function(taskId) {
+  const p = APP_DATA.plans.find(x => x.id == taskId);
+  if(!p) return;
+
+  // Default coordinate if none exists
+  if(!p.coords) p.coords = [42.8746, 74.5698]; // Bishkek center
+  
+  const mapHtml = `
+    <div style="height:400px; border-radius:12px; overflow:hidden; border:1px solid var(--border);" id="leafletMap"></div>
+    <p style="color:var(--text-muted); font-size:11px; margin-top:12px;">Вы можете передвинуть маркер для уточнения локации объекта.</p>
+  `;
+
+  openModal(`Локация объекта: ${p.title}`, mapHtml, () => {
+    saveDB();
+    closeModal();
+    addLog(`Локация: Обновлены координаты для задачи "${p.title}"`);
+  });
+
+  // Init leaflet after modal renders
+  setTimeout(() => {
+    const map = L.map('leafletMap').setView(p.coords, 13);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '© OpenStreetMap contributors'
+    }).addTo(map);
+
+    const marker = L.marker(p.coords, {draggable: true}).addTo(map);
+    marker.on('dragend', function(event) {
+      const position = marker.getLatLng();
+      p.coords = [position.lat, position.lng];
+    });
+    
+    // Fix map gray tiles issue in modals
+    setTimeout(() => map.invalidateSize(), 500);
+  }, 300);
+};
