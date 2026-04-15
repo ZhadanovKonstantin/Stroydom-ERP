@@ -917,3 +917,36 @@ td {
   .margin-bottom-32 { margin-bottom: 24px !important; }
   .margin-top-48 { margin-top: 32px !important; }
 }
+
+/* Telegram WebApp Mode Adjustments */
+body.tg-mode .sidebar {
+  display: none !important;
+}
+
+body.tg-mode .main-content {
+  margin-left: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+}
+
+body.tg-mode .top-header {
+  padding-right: 20px;
+}
+
+body.tg-mode .toast-container {
+  top: 10px;
+  right: 10px;
+}
+
+/* Hide non-essential desktop stuff in TG */
+body.tg-mode .desktop-only {
+  display: none !important;
+}
+
+/* Make cards full width on very small TG screens */
+body.tg-mode .glass-panel {
+  border-radius: 0;
+  border-left: none;
+  border-right: none;
+}
+

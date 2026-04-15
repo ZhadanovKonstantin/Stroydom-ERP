@@ -83,6 +83,19 @@ if (!STATE.currency) STATE.currency = 'SOM';
 if (!STATE.shift) STATE.shift = { active: false, startTime: null, startCoords: null };
 const MODAL = { active: false, title: '', html: '', onSubmit: null };
 
+// --- TELEGRAM MINI APP INITIALIZATION ---
+const tg = window.Telegram ? window.Telegram.WebApp : null;
+// Only activate TG mode if we have actual initData (meaning we are inside Telegram)
+if (tg && tg.initData) {
+  tg.expand(); 
+  tg.ready();
+  document.body.classList.add('tg-mode');
+  console.log("Telegram WebApp initialized", tg.initDataUnsafe);
+  addLog(`System: Запуск внутри Telegram (v${tg.version}) для пользователя ${tg.initDataUnsafe?.user?.username || 'unknown'}`);
+} else if (tg) {
+  console.log("Telegram SDK detected but not in TWA environment.");
+}
+
 // --- UI HELPERS ---
 window.showToast = function(message, type = 'info') {
   let container = document.querySelector('.toast-container');
@@ -273,6 +286,19 @@ async function loadDB() {
       APP_DATA = doc.data();
       CLOUD_STATUS = 'online';
       
+      // Telegram Auto-Login Logic (Immediate check before auth state)
+      if (tg && tg.initDataUnsafe && tg.initDataUnsafe.user) {
+         const tgUser = tg.initDataUnsafe.user;
+         const erpUser = APP_DATA.users.find(u => u.tg === `@${tgUser.username}` || u.tg === String(tgUser.id));
+         if (erpUser && !STATE.user) {
+            STATE.user = erpUser;
+            addLog(`Security: Авто-вход через Telegram WebApp для ${erpUser.name}`);
+            startTelegramBotPolling();
+            if (STATE.view === 'login') STATE.view = (erpUser.role === 'client' ? 'client_orders' : 'employee_plans');
+            STATE._forceFullRender = true;
+         }
+      }
+
       initRealtimeSync();
 
       auth.onAuthStateChanged(async (user) => {
@@ -288,6 +314,7 @@ async function loadDB() {
           if (erpUser) {
             if(!erpUser.uid) { erpUser.uid = user.uid; saveDB(); }
             STATE.user = erpUser;
+            addLog(`Безопасность: Авторизовался через Firebase (${erpUser.name})`);
             startTelegramBotPolling();
             if (STATE.view === 'login') STATE.view = (erpUser.role === 'client' ? 'client_orders' : 'employee_plans');
             // Clean forced re-renders
@@ -332,9 +359,35 @@ async function loadDB() {
     render();
   }
 }
-function saveSession() {
+window.saveSession = function() {
   localStorage.setItem('ERP_SESSION', JSON.stringify(STATE));
-}
+};
+
+window.toggleSidebarMenu = function() {
+  const sidebar = document.querySelector('.sidebar');
+  if (sidebar) {
+    sidebar.style.display = (sidebar.style.display === 'flex') ? 'none' : 'flex';
+    sidebar.style.position = 'fixed';
+    sidebar.style.left = '0';
+    sidebar.style.top = '0';
+    sidebar.style.bottom = '0';
+    sidebar.style.zIndex = '1000';
+    
+    // Add overlay if not present
+    let overlay = document.querySelector('.sidebar-mobile-overlay');
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.className = 'sidebar-mobile-overlay';
+      overlay.style = 'position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:900;';
+      overlay.onclick = () => {
+        sidebar.style.display = 'none';
+        overlay.style.display = 'none';
+      };
+      document.body.appendChild(overlay);
+    }
+    overlay.style.display = (sidebar.style.display === 'flex') ? 'block' : 'none';
+  }
+};
 
 function checkLowStock() {
   if(!APP_DATA.inventory) return;
@@ -616,6 +669,28 @@ async function startTelegramBotPolling() {
   if (!APP_DATA.settings.tgToken) return;
 
   tgPollingState.isPolling = true;
+  
+  // Diagnostic at startup
+  try {
+    const meRes = await fetch(`https://api.telegram.org/bot${APP_DATA.settings.tgToken}/getMe`);
+    const meData = await meRes.json();
+    if (meData.ok) {
+       addLog(`Telegram: Подключено к боту @${meData.result.username} (${meData.result.first_name})`);
+    } else {
+       addLog(`⚠️ Telegram Auth Error: ${meData.description || 'Неверный токен'}`);
+    }
+    
+    const whRes = await fetch(`https://api.telegram.org/bot${APP_DATA.settings.tgToken}/getWebhookInfo`);
+    const whData = await whRes.json();
+    if (whData.ok && whData.result.url) {
+       addLog(`⚠️ Внимание! У бота установлен Webhook: ${whData.result.url}. Polling работать НЕ БУДЕТ. Нужно удалить Webhook.`);
+    } else {
+       addLog(`Telegram: Webhook отсутствует, Polling разрешен.`);
+    }
+  } catch (e) {
+    addLog(`⚠️ Telegram Connection Error: ${e.message}`);
+  }
+
   addLog("Telegram: Запущен фоновый опрос (Polling) сообщений...");
   
   async function poll() {
@@ -636,10 +711,13 @@ async function startTelegramBotPolling() {
         for (const update of data.result) {
           tgPollingState.lastUpdateId = Math.max(tgPollingState.lastUpdateId, update.update_id);
           
+          // Debugging: log any incoming activity
+          const logPrefix = `Telegram [Update ID ${update.update_id}]: `;
+          
           if (update.callback_query) {
              const cb = update.callback_query;
              const cmdData = cb.data; 
-             addLog(`Telegram: Получен Callback "${cmdData}"`);
+             addLog(`${logPrefix}Получен Callback "${cmdData}"`);
              
              if (cmdData.startsWith('/close_task ')) {
                 const taskId = cmdData.split(' ')[1];
@@ -660,12 +738,16 @@ async function startTelegramBotPolling() {
                body: JSON.stringify({ callback_query_id: cb.id, text: "Команда выполнена!" })
              }).catch(e=>e);
           }
-          else if (update.message && update.message.text) {
-             const text = update.message.text;
-             addLog(`Telegram: Получен текст "${text}" от ${update.message.from.first_name || '?'}`);
+          else if (update.message) {
+             const msg = update.message;
+             const from = msg.from?.first_name || 'unknown';
              
-             let m;
-             if (text.startsWith('/start')) {
+             if (msg.text) {
+                const text = msg.text;
+                addLog(`${logPrefix}Текст от ${from}: "${text}"`);
+                
+                let m;
+                if (text.startsWith('/start')) {
                  sendTelegramNotification(`👋 <b>Система СтройДом приветствует вас!</b>\nЯ готов принимать заявки на закупку (закупка ...) и уведомлять о задачах.`);
              } else if (text.startsWith('/my_salary')) {
                  sendTelegramNotification(`⚠️ <b>Робот СтройДом</b>: Для проверки зарплаты перейдите в веб-приложение.`);
@@ -686,6 +768,7 @@ async function startTelegramBotPolling() {
           }
         }
         if (requiresRender) render();
+        }
       }
       
       setTimeout(poll, 1000);
@@ -1668,6 +1751,7 @@ function renderCurrentViewContent() {
                     <input id="sysTgChatId" value="${APP_DATA.settings?.tgChatId || ''}" placeholder="-100xxxxxxxxx">
                   </div>
                   <button class="btn" style="background:var(--secondary); color:white; width:100%;" onclick="saveTgSettings()">Обновить канал</button>
+                  <button class="btn btn-danger" style="width:100%; margin-top:8px;" onclick="deleteTgWebhook()">Сбросить Webhook (Fix)</button>
                   <button class="btn btn-secondary" style="width:100%; margin-top:8px; font-size:10px;" onclick="simulateBotCommand('/close_task', '101')">
                     🧪 Тест: Закрыть задачу #101 из Telegram
                   </button>
@@ -3014,6 +3098,26 @@ window.saveTgSettings = function() {
   if (APP_DATA.settings.tgToken) {
      tgPollingState.isPolling = false; // перезапуск
      startTelegramBotPolling();
+  }
+};
+
+window.deleteTgWebhook = async function() {
+  if (!APP_DATA.settings?.tgToken) return alert("Сначала введите токен!");
+  if (!confirm("Вы уверены, что хотите сбросить Webhook? Это нужно только если бот не принимает сообщения.")) return;
+  
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${APP_DATA.settings.tgToken}/deleteWebhook?drop_pending_updates=true`);
+    const data = await res.json();
+    if (data.ok) {
+       addLog("Telegram: Webhook успешно удален. Перезапуск Polling...");
+       alert("Webhook удален! Попробуйте снова прислать сообщение.");
+       tgPollingState.isPolling = false;
+       startTelegramBotPolling();
+    } else {
+       alert("Ошибка при удалении: " + data.description);
+    }
+  } catch (e) {
+    alert("Ошибка соединения: " + e.message);
   }
 };
 
